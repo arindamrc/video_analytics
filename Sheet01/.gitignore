@@ -1,0 +1,5 @@
+*.npy
+*.txt
+*.tex
+*.avi
+tmp*
