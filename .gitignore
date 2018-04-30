@@ -2,3 +2,4 @@ Datasets*
 *.zip
 tmp.txt
 va2018_env/
+**/*.pkl

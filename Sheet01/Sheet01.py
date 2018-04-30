@@ -4,9 +4,23 @@ import scipy.ndimage as spnd
 import scipy.signal as sig
 import cv2
 import sys
+import os
 import sklearn.cluster as skl
+from sklearn import svm
+from sklearn.externals import joblib
 
+# list of parameters
 bin_sep = 90
+np_extn = ".npy"
+sqrt_s = 2.0 # the multiplier for the variances sigma and tau
+codebook_dim = 256
+sigma_params = [1,2,3,4,5,6]
+tau_params = [1,2]
+k = 0.005 # multipler for the trace cubed
+kay = 9 # multiplier to find dimension of volume around STIPs.
+nx = 3 # no.of cuboids in x-axis
+ny = 3 # no.of cuboids in y-axis
+nt = 2 # no.of cuboids in t-axis
 
 def getVidAsVol(vidLoc):
 	cap = cv2.VideoCapture(vidLoc)
@@ -112,15 +126,13 @@ def findFeatHistContributions(magnitudes, angles):
 	return bins
 
 
-def findSTIPs(vidVol, sqrt_s, vid_desc_file, k = 0.005):
+def findSTIPs(vidVol):
 	vid_desc = [] # initialize video descriptor
 	# find flow magnitudes and angles
-	flow_mag , flow_ang = findOpticalFlow(vidVol)
-	flow_hist_contribs = findFeatHistContributions(flow_mag, flow_ang)
 	stips = np.array([]) # list of STIPs
 	# for each scale pair
-	for i in range(1,7): 
-		for j in [1,2]:
+	for i in sigma_params: 
+		for j in tau_params:
 			sigma_i = 2 ** ((1 + i) / 2.0)
 			tau_j = 2 ** (j / 2.0)
 
@@ -189,15 +201,11 @@ def findSTIPs(vidVol, sqrt_s, vid_desc_file, k = 0.005):
 			# compute HoG and HoF
 
 			# volume dimensions
-			kay = 9 # different from the 'k' used to multiply the trace
 			del_x = 2 * kay * sigma_i
 			del_y = 2 * kay * sigma_i
 			del_t = 2 * kay * tau_j
 
 			# pixels per cuboid in each dimension
-			nx = 3
-			ny = 3
-			nt = 2
 			px = del_x / nx
 			py = del_y / ny
 			pt = del_t / nt
@@ -209,6 +217,9 @@ def findSTIPs(vidVol, sqrt_s, vid_desc_file, k = 0.005):
 			mx, my, mt = grad_mag.shape
 
 			grad_hist_contribs = findFeatHistContributions(grad_mag, grad_ang)
+
+			flow_mag , flow_ang = findOpticalFlow(sm_vidVol)
+			flow_hist_contribs = findFeatHistContributions(flow_mag, flow_ang)
 
 			print "STIP count: %d" % (len(stips_i))
 
@@ -241,32 +252,48 @@ def findSTIPs(vidVol, sqrt_s, vid_desc_file, k = 0.005):
 				feat_desc = normalize(np.concatenate((HoG, HoF)))
 				vid_desc.append(feat_desc)
 	vid_desc = np.stack(vid_desc, axis = 1) # combine all STIP descriptors into one 2D array
-	print vid_desc.shape
-	np.save(vid_desc_file, vid_desc) # save video descriptor to disk	
 
-	# arrange the STIPs in ascending order of time
-	# stips = stips[stips[:,2].argsort()]
-	# return stips
 	return stips, vid_desc
 
 
-
-def makeCodebook(vid_descs, dim = 256):
+def makeCodebook(vid_descs):
 	# vid_descs is a N x 144 dim array; all video descriptors
-	kmeans = skl.KMeans(n_clusters = 256, random_state=0, n_jobs = 4).fit(vid_descs)
+	vid_descs = np.concatenate(vid_descs)
+	print vid_descs.shape
+	kmeans = skl.KMeans(n_clusters = codebook_dim, random_state=0, n_jobs = 4).fit(vid_descs)
 	return kmeans
 
 
 def makeVideoHistogram(vid_desc, kmeans):
-	centers = kmeans.cluster_centers_
 	bins = {}
-	for center in kmeans.cluster_centers_:
-		bins[hash(str(center))] = 0 # hash centers and initialize the histogram bins
+	_,feature_dim = vid_desc.shape
+	for clust_id in range(codebook_dim):
+		bins[clust_id] = 0 # hash centers and initialize the histogram bins
 	for feat_desc in vid_desc: # for all features in the video
-		closest = kmeans.predict(feat_desc)
-		bins[hash(str(closest))] = bins[hash(str(closest))] + 1
+		feat_desc = feat_desc.reshape(1,feature_dim) # reshape into row vector
+		closest = kmeans.predict(feat_desc)[0]
+		bins[closest] = bins[closest] + 1
 	hist = normalize(np.fromiter(bins.itervalues(), dtype = float))
 	return hist
+
+
+def readLabelsFile(path_data, path_labels):
+	space = " "
+	samples = []
+	end_slash = path_data.endswith("/")
+	len_extn = len(".avi")
+	with open(path_labels, "r") as f_labels:
+		for line in f_labels:
+			vid_rel_path,lbl = line.split(space)
+			lbl = int(lbl)
+			if end_slash:
+				vid_path = path_data + vid_rel_path
+			else:
+				vid_path = path_data + "/" + vid_rel_path
+			vid_lbl = vid_rel_path.replace("/", "_")
+			vid_lbl = vid_lbl[:-len_extn] # remove the '.avi' extension
+			samples.append((vid_path, vid_lbl, lbl))
+	return samples
 
 
 
@@ -274,6 +301,7 @@ def showSTIPs(vidVol, stips, radius = 1, thickness = 1, wait = 10):
 	"""
 	Expect the stips sorted in ascending order according to time.
 	"""
+	stips = stips[stips[:,2].argsort()] # arrange the STIPs in ascending order of time
 	ht, wd, dp = vidVol.shape
 	cv2.namedWindow("STIPs")	
 	for f in range(dp):
@@ -286,20 +314,84 @@ def showSTIPs(vidVol, stips, radius = 1, thickness = 1, wait = 10):
 	cv2.destroyAllWindows()
 
 
-def main():
-	vidLoc = "/home/arc/VA_Assignments/Datasets/Wiezmann/bend/daria_bend.avi"
+def prepareData(descriptor_loc, samples, codebook):
+	data = []
+	labels = []
+	for sample in samples:
+		_, vid_name, labl = sample
+		vid_desc = np.load(descriptor_loc + vid_name + np_extn).T
+		hist_vid_desc = makeVideoHistogram(vid_desc, codebook)
+		hist_vid_desc = hist_vid_desc.reshape(1, codebook_dim)
+		data.append(hist_vid_desc)
+		labels.append(labl)
+	data = np.concatenate(data)
+	print "data prepared."
+	return data, labels
 
-	# get the video as a stacked image volume
-	vidVol = getVidAsVol(vidLoc)
-	print vidVol.shape
-	stips, vid_desc = findSTIPs(vidVol, sqrt_s = 2.0, vid_desc_file = "daria_bend")
-	# stips =[
-	# 	[100, 100, 0],
-	# 	[110, 110, 1]
-	# ]
-	# stips = np.array(stips)
-	showSTIPs(vidVol, stips, radius = 10, thickness = 2, wait = 30)
-	# demo()
+
+def extractAndSaveFeatures(descriptor_loc, samples):
+	for sample in samples:
+		vidLoc, vid_name, _ = sample
+		# get the video as a stacked image volume
+		vidVol = getVidAsVol(vidLoc)
+		print vidVol.shape
+		stips, vid_desc = findSTIPs(vidVol)
+		# showSTIPs(vidVol, stips, radius = 10, thickness = 2, wait = 30)
+		np.save(descriptor_loc + vid_name, vid_desc) # save video descriptor to disk	
+
+
+def main():
+	trn_descLoc = "trn_descriptors/"
+	tst_descLoc = "tst_descriptors/"
+	f_kmeans = "codebook.pkl"
+	f_svm = "classifier.pkl"
+	if not os.path.exists(trn_descLoc):
+		os.makedirs(trn_descLoc)
+	if not os.path.exists(tst_descLoc):
+		os.makedirs(tst_descLoc)
+
+	train_data = readLabelsFile("/home/arc/VA_Assignments/Datasets/Wiezmann", "/home/arc/VA_Assignments/Datasets/Wiezmann/train.txt")
+		
+	extractAndSaveFeatures(trn_descLoc, train_data)
+
+	test_data = readLabelsFile("/home/arc/VA_Assignments/Datasets/Wiezmann", "/home/arc/VA_Assignments/Datasets/Wiezmann/test.txt")
+
+	extractAndSaveFeatures(tst_descLoc, test_data)
+	
+	all_vids_desc = []
+	for train_sample in train_data:
+		_, vid_name, _ = train_sample
+		vid_desc = np.load(trn_descLoc + vid_name + np_extn).T
+		all_vids_desc.append(vid_desc)
+
+	print "making codebook..."
+	codebook = makeCodebook(all_vids_desc)
+	joblib.dump(codebook, f_kmeans)
+	print "codebook made."
+
+	# loading codebook
+	# codebook = joblib.load(f_kmeans)
+
+	print "commencing training..."
+	svm_trn_data, svm_trn_labl = prepareData(trn_descLoc, train_data, codebook)
+
+	# classify using linear SVM
+	lin_clf = svm.LinearSVC()
+	lin_clf.fit(svm_trn_data, svm_trn_labl)
+	joblib.dump(lin_clf, f_svm)
+	print "trained."
+
+	# lin_clf = joblib.load(f_svm)
+
+	print "testing..."
+	svm_tst_data, svm_tst_labl = prepareData(tst_descLoc, test_data, codebook)
+
+	preds = lin_clf.predict(svm_tst_data)
+	acc = 0
+	for (pred, actual) in zip(preds, svm_tst_labl):
+		if pred == actual:
+			acc = acc + 1
+	print "accuracy = %f percent" % ((acc * 100.0)/len(svm_tst_labl))
 
 if __name__ == '__main__':
 	main()
