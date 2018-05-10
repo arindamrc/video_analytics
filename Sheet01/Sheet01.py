@@ -350,6 +350,7 @@ def main():
 	if not os.path.exists(tst_descLoc):
 		os.makedirs(tst_descLoc)
 
+	# Please change the locations accordingly
 	train_data = readLabelsFile("/home/arc/VA_Assignments/Datasets/Wiezmann", "/home/arc/VA_Assignments/Datasets/Wiezmann/train.txt")
 		
 	extractAndSaveFeatures(trn_descLoc, train_data)
