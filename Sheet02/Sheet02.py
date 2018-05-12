@@ -23,6 +23,18 @@ SAMPLE_STEP = 5
 MEDIANBLUR_KSIZE = 3
 TRACKLEN = 15
 
+FIELD_LOC = "loc"
+FIELD_HOG = "HoG"
+FIELD_HOF = "HoF"
+FIELD_MBHx = "MBHx"
+FIELD_MBHy = "MBHy"
+
+# histogram bins
+BINS_HOG = [45,90,135,180,225,270,315,360]
+BINS_HOF = [0,45,90,135,180,225,270,315,360]
+BINS_MBH = [45,90,135,180,225,270,315,360]
+
+
 # Some utilities
 
 def loadVideo(location):
@@ -120,21 +132,164 @@ def getDenseOpticalFlow(curFrame, nxtframe):
 	return flow[...,0], flow[...,1]
 
 
+def initTrajectoryPoint(pt):
+	"""
+	Initialize a dictionary of trajectory point information.
+	"""
+	ptInfo = {
+			FIELD_LOC : pt,
+			FIELD_HOG : [],
+			FIELD_HOF : [],
+			FIELD_MBHx : [],
+			FIELD_MBHy : [],
+		}
+	return ptInfo
+
+
+def initTrajectories(startPoints):
+	"""
+	Get the starting points of different trajectories as a list of 2d points
+	and convert it into a list of trajectories.
+	"""
+	trajectories = []
+	for pt in startPoints:
+		trajectory = []
+		ptInfo = initTrajectoryPoint(np.array(pt))
+		trajectory.append(ptInfo)
+		trajectories.append(trajectory)
+	return trajectories
+
+
+def getGradients(frame):
+	"""
+	Calculates the gradient matrices(dx,dy) for this frame.
+	"""
+	gradX = cv2.Sobel(frame, -1, 1, 0)
+	gradY = cv2.Sobel(frame, -1, 0, 1)
+	return gradX, gradY
+
+
+def getMagnitudeAndAngle(x, y):
+	"""
+	Get the magnitude and angle of vectors from their x and y components.
+	"""
+	mag, ang = cv2.cartToPolar(x,y)
+	return mag, ang
+
+
+def findIntegralHistogram(magnitudes, angles, binVals):
+	"""
+	Interpolate and find the contribution of each pixel 
+	towards the histogram bins. Calculate the integral of
+	this histogram bins for ease of computation.
+	"""
+	binCount = len(binVals)
+	if 360 % bin_sep != 0: # ensure uniform bins
+		raise ValueError('could not divide bins evenly for bin separation %f' % (bin_sep))
+	binCount = int(binCount)
+	bins = []
+	for i in range(binCount - 1):
+		bin_i = angles.copy()
+		binVal = binVals[i]
+		bin_i = 1.0 - (abs(bin_i - binVals[i]) / abs(binVals[i + 1] - binVals[i]))
+
+		# discard values not between 0 and 1
+		bin_i[abs(bin_i) > 1.0] = 0.0
+		bin_i[bin_i < 0.0] = 0.0
+
+		if i == 0: 
+			# only for the first bin; all votes go to the lowest bin
+			# for values lower than the lowest bin denomination.
+			bin_i[bin_i < binVals[i]] = 1.0
+
+		# find histogram response from the magnitude
+		bin_i = bin_i * magnitudes
+		bin_i = cv2.integral(bin_i) # calculate the integral
+		bins.append(bin_i)
+	return bins
+
+
+def applyMedianBlur(uFlow, vFlow):
+	"""
+	Apply median blur to the matrices.
+	"""
+	uFlowBlurred = cv2.medianBlur(uFlow, MEDIANBLUR_KSIZE)
+	vFlowBlurred = cv2.medianBlur(vFlow, MEDIANBLUR_KSIZE)
+	return uFlowBlurred, vFlowBlurred
+
+def getAllIntegralHistograms(frame, uFlow, vFlow):
+	pixGradX, pixGradY = getGradients(frame)
+	uMBHX, uMBHY = getGradients(uFlow)
+	vMBHX, vMBHY = getGradients(vFlow)
+
+	pixMag, pixAng = getMagnitudeAndAngle(pixGradX, pixGradY)
+	MBHxMag, MBHxAng = getMagnitudeAndAngle(uMBHX, uMBHY)
+	MBHyMag, MBHyAng = getMagnitudeAndAngle(vMBHX, vMBHY)
+	flowMag, flowAng = getMagnitudeAndAngle(uFlow, vFlow)
+
+	intHistHoG = findIntegralHistogram(pixMag, pixAng, BINS_HOG)
+	intHistHoF = findIntegralHistogram(flowMag, flowAng, BINS_HOF)
+	intHistMBHx = findIntegralHistogram(MBHxMag, MBHxAng, BINS_MBH)
+	intHistMBHy = findIntegralHistogram(MBHyMag, MBHyAng, BINS_MBH)
+
+	return intHistHoG, intHistHoF, intHistMBHx, intHistMBHy
+
+
+def findTrajectories(curFrame, nxtFrame, trajectories):
+	"""
+	Given two consecutive frames add trajectory points that are 
+	present in the next frame. Uses dense optical flow to calculate
+	trajectory points.
+	"""
+	uFlow, vFlow = getDenseOpticalFlow(curFrame, nxtFrame)
+	minBoundary = [0,0] 
+	maxBoundary = [len(curFrame), len(curFrame[0]) - 1]
+	# apply median filter to optical flow
+	uFlowBlurred, vFlowBlurred = applyMedianBlur(uFlow, vFlow)
+
+	pixGradX, pixGradY = getGradients(frame) # get frame garadients
+	uMBHX, uMBHY = getGradients(uFlow) # get x-flow gradients
+	vMBHX, vMBHY = getGradients(vFlow) # get y-flow gradients
+
+	# get integral histograms of all descriptors
+	intHistHoG, intHistHoF, intHistMBHx, intHistMBHy = getAllIntegralHistograms(frame, uFlow, vFlow)
+
+	toDelete = []
+	for i in range(len(trajectories)): # for each trajectory
+		trajectory = trajectories[i]
+		lastTrackedPt = trajectory[len(trajectory) - 1][FIELD_LOC]
+		# extract the velocity vector from the flow
+		u = uFlowBlurred[lastTrackedPt[0], lastTrackedPt[1]] 
+		v = vFlowBlurred[lastTrackedPt[0], lastTrackedPt[1]]
+		newTrajectoryPt = np.array(lastTrackedPt) + [u,v]
+		if any(newTrajectoryPt > maxBoundary) or any(newTrajectoryPt < minBoundary):
+			# remove this trajectory; we need complet ones!
+			toDelete.append(i)
+			# continue on to the next one
+			continue
+		trajectory.append(initTrajectoryPoint(newTrajectoryPt))
+	for d in toDelete:
+		del trajectories[i]
+
 
 def findDescriptors(videoVol):
 	"""
 	Get HoG, HoF, MBHx and MBHy based descriptors from the video volume.
 	Returns: A 426 dimensional video descriptor vector.
 	"""
+	# start with the first frame
+	frame = videoVol[:,:,0]
+	nxtframe = videoVol[:,:,1]
+	# get all feature points by dense sampling
+	sampledPoints = getDenseSamples(prvFrame)
+	trajectories = initTrajectories(sampledPoints)
+	findTrajectories(frame, nxtFrame, trajectories)
 	_,_,dp = videoVol.shape
-	for f in range(0, dp-1): # Need 2 frames to calculate optical flow!
+	for f in range(1, dp - 1): # Need 2 frames to calculate optical flow!
 		frame = videoVol[:,:,f]
-		sampledPoints = getDenseSamples(frame)
-		nxtFrame = videoVol[:,:,f+1]
-		uFlow, vFlow = getDenseOpticalFlow(frame, nxtframe)
-		# apply median filter to optical flow
-		uFlowBlurred = cv2.medianBlur(uFlow, MEDIANBLUR_KSIZE)
-		vFlowBlurred = cv2.medianBlur(vFlow, MEDIANBLUR_KSIZE)
+		nxtFrame = videoVol[:,:,f + 1]
+		# find trajectory points in the frame
+		findTrajectories(frame, nxtframe, trajectories)
 
 
 def extractAndSaveDescriptors(saveLoc, samples):
