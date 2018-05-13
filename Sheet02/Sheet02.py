@@ -324,17 +324,23 @@ def tubeSlice(ptInfo, frameInfo):
 	return
 
 
-def collate(trajectory):
+def collateSlices(trajectory):
 	"""
 	Collate the histogram of last TUBE_GRID_T slices.
 	"""
 	collationSlices = trajectory[FIELD_PTS][-TUBE_GRID_T] # take from the end
+	# initialize sub-cell histograms
 	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
+		subcellHistograms = [[]] * TUBE_GRID_X * TUBE_GRID_Y
 		for pt in collationSlices:
 			allSubcellDesc = pt[d] # contains a histogram per subcell
-			for desc in allSubcellDesc: # for each subcell histogram of type d
-				pass
-	pass
+			for i in range(len(allSubcellDesc)): # for each histogram of type d in all subcells
+				desc = allSubcellDesc[i]
+				if len(subcellHistograms[i]) == 0:
+					subcellHistograms.append(desc)
+				else:
+					subcellHistograms[i] = np.array(desc) + subcellHistograms[i]
+		trajectory[d].append(subcellHistograms)
 
 
 def findTrajectories(curFrame, nxtFrame, trajectories):
@@ -369,7 +375,7 @@ def findTrajectories(curFrame, nxtFrame, trajectories):
 		tubeSlice(ptInfo, frameInfo)
 		trajectory[FIELD_PTS].append(ptInfo)
 		if (i + 1) % TUBE_GRID_T: # end of sub-cell reached
-			collate(trajectory) # combine the histograms in the time dimension
+			collateSlices(trajectory) # combine the histograms in the time dimension
 	# finally delete invalid trajectories
 	for d in toDelete:
 		del trajectories[i]
