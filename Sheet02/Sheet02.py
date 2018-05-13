@@ -11,7 +11,6 @@ from sklearn.externals import joblib
 
 
 # Some constants and parameters
-
 TRN_VIDLOC = "/home/arc/VA_Assignments/Datasets/Wiezmann"
 TST_VIDLOC = "/home/arc/VA_Assignments/Datasets/Wiezmann"
 TRN_FLNAME = "/home/arc/VA_Assignments/Datasets/Wiezmann/train.txt"
@@ -21,13 +20,22 @@ TST_VIDDESC  = "./tst_descriptors/"
 CORNERNESS_SCALE = 0.001
 SAMPLE_STEP = 5
 MEDIANBLUR_KSIZE = 3
-TRACKLEN = 15
+TUBE_T = 15
+TUBE_X = 32
+TUBE_Y = 32
+TUBE_GRID_X = 2
+TUBE_GRID_Y = 2
+TUBE_GRID_T = 3
 
+# Dictionary fields
 FIELD_LOC = "loc"
 FIELD_HOG = "HoG"
 FIELD_HOF = "HoF"
 FIELD_MBHx = "MBHx"
 FIELD_MBHy = "MBHy"
+FIELD_UFLOW = "uFlow"
+FIELD_VFLOW = "vFlow"
+FIELD_PTS = "pts"
 
 # histogram bins
 BINS_HOG = [45,90,135,180,225,270,315,360]
@@ -146,6 +154,20 @@ def initTrajectoryPoint(pt):
 	return ptInfo
 
 
+def initTrajectory():
+	"""
+	Initialize a dictionary of trajectory information.
+	"""
+	trajInfo = {
+		FIELD_PTS : [],
+		FIELD_HOG : [],
+		FIELD_HOF : [],
+		FIELD_MBHx : [],
+		FIELD_MBHy : []
+	}
+	return trajInfo
+
+
 def initTrajectories(startPoints):
 	"""
 	Get the starting points of different trajectories as a list of 2d points
@@ -153,10 +175,10 @@ def initTrajectories(startPoints):
 	"""
 	trajectories = []
 	for pt in startPoints:
-		trajectory = []
+		trajInfo = initTrajectory()
 		ptInfo = initTrajectoryPoint(np.array(pt))
-		trajectory.append(ptInfo)
-		trajectories.append(trajectory)
+		trajInfo[FIELD_PTS].append(ptInfo)
+		trajectories.append(trajInfo)
 	return trajectories
 
 
@@ -169,12 +191,14 @@ def getGradients(frame):
 	return gradX, gradY
 
 
+
 def getMagnitudeAndAngle(x, y):
 	"""
 	Get the magnitude and angle of vectors from their x and y components.
 	"""
 	mag, ang = cv2.cartToPolar(x,y)
 	return mag, ang
+
 
 
 def findIntegralHistogram(magnitudes, angles, binVals):
@@ -209,6 +233,7 @@ def findIntegralHistogram(magnitudes, angles, binVals):
 	return bins
 
 
+
 def applyMedianBlur(uFlow, vFlow):
 	"""
 	Apply median blur to the matrices.
@@ -216,6 +241,8 @@ def applyMedianBlur(uFlow, vFlow):
 	uFlowBlurred = cv2.medianBlur(uFlow, MEDIANBLUR_KSIZE)
 	vFlowBlurred = cv2.medianBlur(vFlow, MEDIANBLUR_KSIZE)
 	return uFlowBlurred, vFlowBlurred
+
+
 
 def getAllIntegralHistograms(frame, uFlow, vFlow):
 	pixGradX, pixGradY = getGradients(frame)
@@ -235,11 +262,11 @@ def getAllIntegralHistograms(frame, uFlow, vFlow):
 	return intHistHoG, intHistHoF, intHistMBHx, intHistMBHy
 
 
-def findTrajectories(curFrame, nxtFrame, trajectories):
+def initFrame(curFrame, nxtFrame):
 	"""
-	Given two consecutive frames add trajectory points that are 
-	present in the next frame. Uses dense optical flow to calculate
-	trajectory points.
+	Calculate data structures based on the current frame and the next.
+	These include image gradients, optical flows and their gradients.
+	Everything is wrapped up in a dictionary structure for subsequent use.
 	"""
 	uFlow, vFlow = getDenseOpticalFlow(curFrame, nxtFrame)
 	minBoundary = [0,0] 
@@ -247,29 +274,107 @@ def findTrajectories(curFrame, nxtFrame, trajectories):
 	# apply median filter to optical flow
 	uFlowBlurred, vFlowBlurred = applyMedianBlur(uFlow, vFlow)
 
-	pixGradX, pixGradY = getGradients(frame) # get frame garadients
+	pixGradX, pixGradY = getGradients(curFrame) # get frame garadients
 	uMBHX, uMBHY = getGradients(uFlow) # get x-flow gradients
 	vMBHX, vMBHY = getGradients(vFlow) # get y-flow gradients
 
 	# get integral histograms of all descriptors
-	intHistHoG, intHistHoF, intHistMBHx, intHistMBHy = getAllIntegralHistograms(frame, uFlow, vFlow)
+	intHistHoG, intHistHoF, intHistMBHx, intHistMBHy = getAllIntegralHistograms(curFrame, uFlow, vFlow)
+
+	frameInfo = {
+		FIELD_UFLOW : uFlow,
+		FIELD_VFLOW : vFlow,
+		FIELD_HOG : intHistHoG,
+		FIELD_HOF : intHistHoF,
+		FIELD_MBHx : intHistMBHx,
+		FIELD_MBHy : intHistMBHy
+	}
+
+	return frameInfo
+
+
+
+def tubeSlice(ptInfo, frameInfo):
+	"""
+	Calculate the image descriptors around the supplied trajectory point.
+	This is done per frame per trajectory.
+	"""
+	pt = ptInfo[FIELD_LOC]
+	# get the top-left point of the slice
+	tubeTL = pt - [int(TUBE_X / 2), int(TUBE_Y / 2)]
+	dx = int(TUBE_X / TUBE_GRID_X)
+	dy = int(TUBE_Y / TUBE_GRID_Y)
+	for col in range(TUBE_GRID_X):
+		for row in range(TUBE_GRID_Y):
+			# find the four boundary points of the cell
+			cellTL = tuple(tubeTL + [row * dy, col * dx])
+			cellBR = tuple(cellTL + [dy, dx])
+			cellTR = tuple(cellTL + [0, col * dx])
+			cellBL = tuple(cellTL + [row * dy, 0])
+			# for all integral histograms
+			for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
+				desc = frameInfo[d]
+				hist = []
+				for b in desc: # for all histogram bins
+					# get the bin contribution
+					contrib = b[cellBR] - b[cellTR] - b[cellBL] + b[cellTL]
+					hist.append(contrib) # append contributions in bin order
+				ptInfo[d].append(hist)
+		cellTL = tubeTL
+	return
+
+
+def collate(trajectory):
+	"""
+	Collate the histogram of last TUBE_GRID_T slices.
+	"""
+	collationSlices = trajectory[FIELD_PTS][-TUBE_GRID_T] # take from the end
+	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
+		for pt in collationSlices:
+			allSubcellDesc = pt[d] # contains a histogram per subcell
+			for desc in allSubcellDesc: # for each subcell histogram of type d
+				pass
+	pass
+
+
+def findTrajectories(curFrame, nxtFrame, trajectories):
+	"""
+	Given two consecutive frames add trajectory points that are 
+	present in the next frame. Uses dense optical flow to calculate
+	trajectory points.
+	"""
+	frameInfo = initFrame(curFrame, nxtFrame)
+	uFlow, vFlow = getDenseOpticalFlow(frameInfo[FIELD_UFLOW], frameInfo[FIELD_VFLOW])
+	minBoundary = [0,0] 
+	maxBoundary = [len(curFrame), len(curFrame[0]) - 1]
+	# apply median filter to optical flow
+	uFlowBlurred, vFlowBlurred = applyMedianBlur(uFlow, vFlow)
 
 	toDelete = []
 	for i in range(len(trajectories)): # for each trajectory
 		trajectory = trajectories[i]
-		lastTrackedPt = trajectory[len(trajectory) - 1][FIELD_LOC]
+		lastTrackedPt = trajectory[FIELD_PTS][len(trajectory) - 1][FIELD_LOC]
 		# extract the velocity vector from the flow
 		u = uFlowBlurred[lastTrackedPt[0], lastTrackedPt[1]] 
 		v = vFlowBlurred[lastTrackedPt[0], lastTrackedPt[1]]
 		newTrajectoryPt = np.array(lastTrackedPt) + [u,v]
 		if any(newTrajectoryPt > maxBoundary) or any(newTrajectoryPt < minBoundary):
-			# remove this trajectory; we need complet ones!
+			# queue this trajectory for deletion; we need complete ones!
 			toDelete.append(i)
 			# continue on to the next one
 			continue
-		trajectory.append(initTrajectoryPoint(newTrajectoryPt))
+		# initialize the trajectory point descriptor
+		ptInfo = initTrajectoryPoint(newTrajectoryPt)
+		# calculate descriptors of the slice of the trajectory tube 
+		tubeSlice(ptInfo, frameInfo)
+		trajectory[FIELD_PTS].append(ptInfo)
+		if (i + 1) % TUBE_GRID_T: # end of sub-cell reached
+			collate(trajectory) # combine the histograms in the time dimension
+	# finally delete invalid trajectories
 	for d in toDelete:
 		del trajectories[i]
+
+
 
 
 def findDescriptors(videoVol):
