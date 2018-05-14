@@ -26,6 +26,10 @@ TUBE_Y = 32
 TUBE_GRID_X = 2
 TUBE_GRID_Y = 2
 TUBE_GRID_T = 3
+TRAJ_MINVAR = 1.732050807568877
+TRAJ_MAXVAR = 30
+TRAJ_MAXDIS = 20
+
 
 # Dictionary fields
 FIELD_LOC = "loc"
@@ -36,6 +40,8 @@ FIELD_MBHy = "MBHy"
 FIELD_UFLOW = "uFlow"
 FIELD_VFLOW = "vFlow"
 FIELD_PTS = "pts"
+FIELD_SHP = "shp"
+FIELD_DESC = "desc"
 
 # histogram bins
 BINS_HOG = [45,90,135,180,225,270,315,360]
@@ -80,6 +86,14 @@ def displayVideo(videoVol, videoName = "Video", wait = 10):
 		cv2.imshow(videoName, frame)
 		cv2.waitKey(wait)
 	cv2.destroyAllWindows()
+
+
+def normalize(arr):
+	"""
+	normalize the given numpy array
+	"""
+	norm = np.linalg.norm(arr)
+	return arr/norm
 
 
 def readFiles(videoDir, labelFile):
@@ -163,7 +177,9 @@ def initTrajectory():
 		FIELD_HOG : [],
 		FIELD_HOF : [],
 		FIELD_MBHx : [],
-		FIELD_MBHy : []
+		FIELD_MBHy : [],
+		FIELD_SHP : [],
+		FIELD_DESC : []
 	}
 	return trajInfo
 
@@ -282,6 +298,8 @@ def initFrame(curFrame, nxtFrame):
 	intHistHoG, intHistHoF, intHistMBHx, intHistMBHy = getAllIntegralHistograms(curFrame, uFlow, vFlow)
 
 	frameInfo = {
+		FIELD_WIDTH : curFrame.shape[1]
+		FIELD_HEIGHT : curFrame.shape[0]
 		FIELD_UFLOW : uFlow,
 		FIELD_VFLOW : vFlow,
 		FIELD_HOG : intHistHoG,
@@ -307,6 +325,8 @@ def tubeSlice(ptInfo, frameInfo):
 	for col in range(TUBE_GRID_X):
 		for row in range(TUBE_GRID_Y):
 			# find the four boundary points of the cell
+			# perform modulo division to ensure the cell
+			# doesn't overshoot the frame boundaries
 			cellTL = tuple(tubeTL + [row * dy, col * dx])
 			cellBR = tuple(cellTL + [dy, dx])
 			cellTR = tuple(cellTL + [0, col * dx])
@@ -331,8 +351,9 @@ def collateSlices(trajectory):
 	collationSlices = trajectory[FIELD_PTS][-TUBE_GRID_T] # take from the end
 	# initialize sub-cell histograms
 	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
-		subcellHistograms = [[]] * TUBE_GRID_X * TUBE_GRID_Y
-		for pt in collationSlices:
+		# a histogram of type d per subcell
+		subcellHistograms = [[]] * TUBE_GRID_X * TUBE_GRID_Y 
+		for pt in collationSlices: # for each slice
 			allSubcellDesc = pt[d] # contains a histogram per subcell
 			for i in range(len(allSubcellDesc)): # for each histogram of type d in all subcells
 				desc = allSubcellDesc[i]
@@ -343,7 +364,49 @@ def collateSlices(trajectory):
 		trajectory[d].append(subcellHistograms)
 
 
-def findTrajectories(curFrame, nxtFrame, trajectories):
+
+def consolidate(trajectory):
+	"""
+	Collate the subcells or tubes of trajectory to get a flat descriptor.
+	Perform checks to accept or reject trajectory.
+	"""
+	allPts = np.array(trajectory[FIELD_LOC]) # get the trajectory points as a 2D array
+	xVar, yVar = np.var(allPts, axis = 0)
+	if xVar < TRAJ_MINVAR and yVar < TRAJ_MINVAR: 
+		# reject static trajectories
+		return False
+	if xVar > TRAJ_MAXVAR or yVar > TRAJ_MAXVAR:
+		# reject trajectories with random displacements
+		return False
+	xDiff, yDiff = np.diff(allPts, axis = 0)
+	# calculate trajectory segment lengths
+	segLen = np.sqrt(xDiff * xDiff + yDiff * yDiff)
+	# calculate overall trajectory length
+	trajLen = np.sum(segLen)
+	# length of the maximum segment
+	maxSegLen = np.max(segLen)
+	if maxSegLen > TRAJ_MAXDIS:
+		# trajectory overshoots maximum displacement limit
+		return False
+	if maxSegLen > 0.7 * trajLen: 
+		# displacement between consecutive frames too large
+		return False
+
+	# finally calculate normalized trajectory shape descriptor
+	allPts = np.ravel(allPts)
+	allPts = allPts / trajLen
+	trajectory[FIELD_DESC].extend(allPts)
+
+	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
+		hist = normalize(np.ravel(np.array(trajectory[d])))
+		trajectory[FIELD_DESC].extend(hist)
+
+	return trajectory
+
+
+
+
+def followTrajectories(curFrame, nxtFrame, trajectories):
 	"""
 	Given two consecutive frames add trajectory points that are 
 	present in the next frame. Uses dense optical flow to calculate
@@ -394,13 +457,23 @@ def findDescriptors(videoVol):
 	# get all feature points by dense sampling
 	sampledPoints = getDenseSamples(prvFrame)
 	trajectories = initTrajectories(sampledPoints)
-	findTrajectories(frame, nxtFrame, trajectories)
+	followTrajectories(frame, nxtFrame, trajectories)
 	_,_,dp = videoVol.shape
+	descriptors = []
 	for f in range(1, dp - 1): # Need 2 frames to calculate optical flow!
 		frame = videoVol[:,:,f]
 		nxtFrame = videoVol[:,:,f + 1]
 		# find trajectory points in the frame
-		findTrajectories(frame, nxtframe, trajectories)
+		followTrajectories(frame, nxtframe, trajectories)
+		for trajectory in trajectories:
+			trajDescriptor = None
+			if len(trajectory[FIELD_PTS]) >= TUBE_T: # maximum length reached
+				trajDescriptor = consolidate(trajectory)
+			if trajDescriptor is False: # invalid trajectory
+				continue
+			descriptors.append(trajDescriptor)
+	return descriptors
+
 
 
 def extractAndSaveDescriptors(saveLoc, samples):
