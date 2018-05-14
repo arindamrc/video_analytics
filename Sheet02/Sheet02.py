@@ -515,12 +515,22 @@ def findTrajectories(videoVol):
 				else:
 					# trajectory complete; stop following!
 					trajectory[FIELD_FOLLOW] = False
-		# remove invalid trajectories
-		for d in toDelete:
+		# remove invalid trajectories; the deletion list is in ascending order
+		for d in toDelete[::-1]:
 			del trajectories[d]
 		# find new points to follow
 		sampledPoints = getDenseSamples(frame, frameTrajPts)
 		trajectories.extend(initTrajectories(sampledPoints))
+	# finally prune incomplete trajectories
+	toDelete = []
+	for t in range(len(trajectories)):
+		trajectory = trajectories[t]
+		if trajectory[FIELD_FOLLOW] is True:
+			# incomplete: queue trajectory for deletion
+			toDelete.append(t)
+	# remove invalid trajectories; the deletion list is in ascending order
+	for d in toDelete[::-1]:
+		del trajectories[d]
 	return trajectories
 
 
@@ -545,6 +555,7 @@ def extractAndSaveTrajectories(saveLoc, samples):
 		for trajectory in trajectories:
 			trajList.append(trajectory[FIELD_DESC])
 		trajDescriptors = reduceDimensions(np.array(trajList), DESC_DIM)
+		print trajDescriptors.shape
 		np.save(saveLoc + videoName, trajDescriptors) # save trajectories to disk	
 
 
@@ -572,9 +583,11 @@ def main():
 	trajList = []
 	print len(trajectories)
 	for trajectory in trajectories:
-		print len(trajectory[FIELD_DESC]),
-		trajList.append(trajectory[FIELD_DESC])
-	np.save("./trajdummy", np.array(trajList)) # save trajectories to disk
+		if len(trajectory[FIELD_DESC]) > 0:
+			trajList.append(trajectory[FIELD_DESC])
+	trajDescriptors = reduceDimensions(np.array(trajList), DESC_DIM)
+	print trajDescriptors.shape
+	np.save("./trajdummy", trajDescriptors) # save trajectories to disk
 
 
 if __name__ == '__main__':
