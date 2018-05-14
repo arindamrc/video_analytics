@@ -5,7 +5,7 @@ import scipy.signal as sig
 import cv2
 import sys
 import os
-import sklearn.cluster as skl
+from sklearn.decomposition import PCA
 from sklearn import svm
 from sklearn.externals import joblib
 
@@ -30,6 +30,7 @@ TRAJ_MINVAR = 1.732050807568877
 TRAJ_MAXVAR = 30
 TRAJ_MAXDIS = 20
 EPSILON = 0.000001
+DESC_DIM = 64
 
 # Dictionary fields
 FIELD_LOC = "loc"
@@ -390,9 +391,6 @@ def collateSlices(trajectory):
 				else:
 					subcellHistograms[i] = desc + subcellHistograms[i]
 		trajectory[d].append(subcellHistograms)
-		# print len(subcellHistograms)
-		# print subcellHistograms
-	# print len(trajectory[d])
 
 
 
@@ -526,6 +524,14 @@ def findTrajectories(videoVol):
 	return trajectories
 
 
+def reduceDimensions(trajDescriptors, maxDim):
+	"""
+	Use PCA to reduce the dimension of the trajectory descriptors.
+	The descriptors are passed as a numpy 2D array with one descriptor per row.
+	"""
+	pca = PCA(n_components = maxDim)
+	return pca.fit_transform(trajDescriptors)
+
 
 def extractAndSaveTrajectories(saveLoc, samples):
 	"""
@@ -538,7 +544,11 @@ def extractAndSaveTrajectories(saveLoc, samples):
 		trajList = []
 		for trajectory in trajectories:
 			trajList.append(trajectory[FIELD_DESC])
-		np.save(saveLoc + videoName, np.array(trajList)) # save trajectories to disk	
+		trajDescriptors = reduceDimensions(np.array(trajList), DESC_DIM)
+		np.save(saveLoc + videoName, trajDescriptors) # save trajectories to disk	
+
+
+
 
 ##########################################################################################
 
