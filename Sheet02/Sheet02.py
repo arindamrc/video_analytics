@@ -29,7 +29,7 @@ TUBE_GRID_T = 3
 TRAJ_MINVAR = 1.732050807568877
 TRAJ_MAXVAR = 30
 TRAJ_MAXDIS = 20
-
+EPSILON = 0.000001
 
 # Dictionary fields
 FIELD_LOC = "loc"
@@ -42,6 +42,9 @@ FIELD_VFLOW = "vFlow"
 FIELD_PTS = "pts"
 FIELD_SHP = "shp"
 FIELD_DESC = "desc"
+FIELD_HEIGHT = "ht"
+FIELD_WIDTH = "wd"
+FIELD_FOLLOW = "fol"
 
 # histogram bins
 BINS_HOG = [45,90,135,180,225,270,315,360]
@@ -90,10 +93,12 @@ def displayVideo(videoVol, videoName = "Video", wait = 10):
 
 def normalize(arr):
 	"""
-	normalize the given numpy array
+	Normalize the given numpy array. Also return the norm.
 	"""
 	norm = np.linalg.norm(arr)
-	return arr/norm
+	if norm < EPSILON:
+		return arr, 0.0
+	return arr/norm, norm
 
 
 def readFiles(videoDir, labelFile):
@@ -120,13 +125,16 @@ def readFiles(videoDir, labelFile):
 
 ##########################################################################################
 
-def getDenseSamples(frame):
+def getDenseSamples(frame, trackedPts = None):
 	"""
 	Get a list of pixel locations that are interesting features to track.
 	The frame is sampled densely every SAMPLE_STEP pixel.
+	Pixels in a SAMPLE_STEP x SAMPLE_STEP neighborhood of a tracked
+	location are not chosen.
 	"""
 	# get corner-ness values for each pixel
 	# based on the shi-tomasi method
+	w, h = frame.shape
 	cornerResponses = cv2.cornerMinEigenVal(frame, 3, 3)
 	# calculate the threshold for corner selection
 	threshold = CORNERNESS_SCALE * np.max(cornerResponses)
@@ -136,21 +144,26 @@ def getDenseSamples(frame):
 	mask = np.ravel(np.zeros_like(cornerResponses))
 	mask[::SAMPLE_STEP] = 1
 	mask = np.reshape(mask, cornerResponses.shape)
+	if trackedPts is not None:
+		for pt in trackedPts:
+			tl = clip2DPoint(pt - [int(SAMPLE_STEP / 2), int(SAMPLE_STEP / 2)], [0,w], [0,h])
+			br = clip2DPoint(pt + [int(SAMPLE_STEP / 2), int(SAMPLE_STEP / 2)], [0,w], [0,h])
+			mask[tl[0]:br[0], tl[1]:br[1]] = 0 # don'T sample in the neighborhood of tracked points
 	# apply the mask; element-wise multiplication
 	cornerResponses = cornerResponses * mask
 	# choose those locations which are still non-zero
 	xs, ys = np.where(cornerResponses > 0)
-	points = [(x,y) in zip(xs,ys)]
+	points = zip(xs,ys)
 	return points
 
 
-def getDenseOpticalFlow(curFrame, nxtframe):
+def getDenseOpticalFlow(curFrame, nxtFrame):
 	"""
 	Uses Farnebacks algorithm to get dense optical flow between frames.
 	Returns: Two matrices that contains the x and y components of 
 	the optical flow respectively.
 	"""
-	flow = cv2.calcOpticalFlowFarneback(curFrame, nxtframe, 0.5, 3, 15, 3, 5, 1.2, 0)
+	flow = cv2.calcOpticalFlowFarneback(curFrame, nxtFrame, 0.5, 3, 15, 3, 5, 1.2, 0)
 	return flow[...,0], flow[...,1]
 
 
@@ -163,7 +176,7 @@ def initTrajectoryPoint(pt):
 			FIELD_HOG : [],
 			FIELD_HOF : [],
 			FIELD_MBHx : [],
-			FIELD_MBHy : [],
+			FIELD_MBHy : []
 		}
 	return ptInfo
 
@@ -179,7 +192,8 @@ def initTrajectory():
 		FIELD_MBHx : [],
 		FIELD_MBHy : [],
 		FIELD_SHP : [],
-		FIELD_DESC : []
+		FIELD_DESC : [],
+		FIELD_FOLLOW : True
 	}
 	return trajInfo
 
@@ -212,7 +226,11 @@ def getMagnitudeAndAngle(x, y):
 	"""
 	Get the magnitude and angle of vectors from their x and y components.
 	"""
-	mag, ang = cv2.cartToPolar(x,y)
+	# mag, ang = cv2.cartToPolar(x,y)
+	mag = np.sqrt((x * x + y * y)) # the gradient magnitude
+	ang = np.arctan2(y, x) * 180 + np.pi
+	ang[ang < 0] = ang[ang < 0] + 360 # the gradient angle (0 to 360 degrees)
+	ang = np.mod(ang, 360)
 	return mag, ang
 
 
@@ -224,28 +242,26 @@ def findIntegralHistogram(magnitudes, angles, binVals):
 	this histogram bins for ease of computation.
 	"""
 	binCount = len(binVals)
-	if 360 % bin_sep != 0: # ensure uniform bins
-		raise ValueError('could not divide bins evenly for bin separation %f' % (bin_sep))
 	binCount = int(binCount)
 	bins = []
 	for i in range(binCount - 1):
-		bin_i = angles.copy()
+		iBin = angles.copy()
 		binVal = binVals[i]
-		bin_i = 1.0 - (abs(bin_i - binVals[i]) / abs(binVals[i + 1] - binVals[i]))
+		iBin = 1.0 - (abs(iBin - binVals[i]) / abs(binVals[i + 1] - binVals[i]))
 
 		# discard values not between 0 and 1
-		bin_i[abs(bin_i) > 1.0] = 0.0
-		bin_i[bin_i < 0.0] = 0.0
+		iBin[abs(iBin) > 1.0] = 0.0
+		iBin[iBin < 0.0] = 0.0
 
 		if i == 0: 
 			# only for the first bin; all votes go to the lowest bin
 			# for values lower than the lowest bin denomination.
-			bin_i[bin_i < binVals[i]] = 1.0
+			iBin[iBin < binVals[i]] = 1.0
 
 		# find histogram response from the magnitude
-		bin_i = bin_i * magnitudes
-		bin_i = cv2.integral(bin_i) # calculate the integral
-		bins.append(bin_i)
+		iBin = iBin * magnitudes
+		iBin = cv2.integral(iBin) # calculate the integral
+		bins.append(iBin)
 	return bins
 
 
@@ -298,8 +314,8 @@ def initFrame(curFrame, nxtFrame):
 	intHistHoG, intHistHoF, intHistMBHx, intHistMBHy = getAllIntegralHistograms(curFrame, uFlow, vFlow)
 
 	frameInfo = {
-		FIELD_WIDTH : curFrame.shape[1]
-		FIELD_HEIGHT : curFrame.shape[0]
+		FIELD_WIDTH : curFrame.shape[1],
+		FIELD_HEIGHT : curFrame.shape[0],
 		FIELD_UFLOW : uFlow,
 		FIELD_VFLOW : vFlow,
 		FIELD_HOG : intHistHoG,
@@ -310,6 +326,16 @@ def initFrame(curFrame, nxtFrame):
 
 	return frameInfo
 
+
+def clip2DPoint(pt, xRange, yRange):
+	"""
+	Clips a 2D point to given range.
+	"""
+	pt[0] = xRange[0] if pt[0] < xRange[0] else pt[0]
+	pt[0] = xRange[1] if pt[0] > xRange[1] else pt[0]
+	pt[1] = yRange[0] if pt[1] < yRange[0] else pt[1]
+	pt[1] = yRange[1] if pt[1] > yRange[1] else pt[1]
+	return pt
 
 
 def tubeSlice(ptInfo, frameInfo):
@@ -327,10 +353,11 @@ def tubeSlice(ptInfo, frameInfo):
 			# find the four boundary points of the cell
 			# perform modulo division to ensure the cell
 			# doesn't overshoot the frame boundaries
-			cellTL = tuple(tubeTL + [row * dy, col * dx])
-			cellBR = tuple(cellTL + [dy, dx])
-			cellTR = tuple(cellTL + [0, col * dx])
-			cellBL = tuple(cellTL + [row * dy, 0])
+			cellTL = clip2DPoint(tubeTL + [row * dy, col * dx], [0, frameInfo[FIELD_WIDTH]], [0, frameInfo[FIELD_HEIGHT]]).astype(int)
+			cellBR = tuple(clip2DPoint(cellTL + [dy, dx], [0, frameInfo[FIELD_WIDTH]], [0, frameInfo[FIELD_HEIGHT]]).astype(int))
+			cellTR = tuple(clip2DPoint(cellTL + [0, col * dx], [0, frameInfo[FIELD_WIDTH]], [0, frameInfo[FIELD_HEIGHT]]).astype(int))
+			cellBL = tuple(clip2DPoint(cellTL + [row * dy, 0], [0, frameInfo[FIELD_WIDTH]], [0, frameInfo[FIELD_HEIGHT]]).astype(int))
+			cellTL = tuple(cellTL)
 			# for all integral histograms
 			for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
 				desc = frameInfo[d]
@@ -343,34 +370,36 @@ def tubeSlice(ptInfo, frameInfo):
 		cellTL = tubeTL
 	return
 
-
+ 
 def collateSlices(trajectory):
 	"""
 	Collate the histogram of last TUBE_GRID_T slices.
 	"""
-	collationSlices = trajectory[FIELD_PTS][-TUBE_GRID_T] # take from the end
+	collationSlices = trajectory[FIELD_PTS][-TUBE_GRID_T:] # take from the end
 	# initialize sub-cell histograms
 	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
 		# a histogram of type d per subcell
-		subcellHistograms = [[]] * TUBE_GRID_X * TUBE_GRID_Y 
+		subcellHistograms = [[]] * (TUBE_GRID_X * TUBE_GRID_Y) 
 		for pt in collationSlices: # for each slice
 			allSubcellDesc = pt[d] # contains a histogram per subcell
 			for i in range(len(allSubcellDesc)): # for each histogram of type d in all subcells
 				desc = allSubcellDesc[i]
 				if len(subcellHistograms[i]) == 0:
-					subcellHistograms.append(desc)
+					subcellHistograms[i].append(desc)
 				else:
 					subcellHistograms[i] = np.array(desc) + subcellHistograms[i]
+		# print len(subcellHistograms)
 		trajectory[d].append(subcellHistograms)
+	# print len(trajectory[d])
 
 
 
-def consolidate(trajectory):
+def consolidateTrajectory(trajectory):
 	"""
 	Collate the subcells or tubes of trajectory to get a flat descriptor.
 	Perform checks to accept or reject trajectory.
 	"""
-	allPts = np.array(trajectory[FIELD_LOC]) # get the trajectory points as a 2D array
+	allPts = np.array([ptInfo[FIELD_LOC] for ptInfo in trajectory[FIELD_PTS]]) # get the trajectory points as a 2D array
 	xVar, yVar = np.var(allPts, axis = 0)
 	if xVar < TRAJ_MINVAR and yVar < TRAJ_MINVAR: 
 		# reject static trajectories
@@ -378,7 +407,9 @@ def consolidate(trajectory):
 	if xVar > TRAJ_MAXVAR or yVar > TRAJ_MAXVAR:
 		# reject trajectories with random displacements
 		return False
-	xDiff, yDiff = np.diff(allPts, axis = 0)
+	diff = np.diff(allPts, axis = 0)
+	xDiff = diff[:,0]
+	yDiff = diff[:,1]
 	# calculate trajectory segment lengths
 	segLen = np.sqrt(xDiff * xDiff + yDiff * yDiff)
 	# calculate overall trajectory length
@@ -393,14 +424,21 @@ def consolidate(trajectory):
 		return False
 
 	# finally calculate normalized trajectory shape descriptor
-	allPts = np.ravel(allPts)
-	allPts = allPts / trajLen
-	trajectory[FIELD_DESC].extend(allPts)
+	shapeDesc = np.ravel(diff)
+	shapeDesc = shapeDesc / trajLen
+	trajectory[FIELD_DESC].extend(shapeDesc)
 
 	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
-		hist = normalize(np.ravel(np.array(trajectory[d])))
+		# print str(len(trajectory[d])),
+		hist, norm = normalize(np.ravel(np.array(trajectory[d])))
+		# if norm <= EPSILON:
+		# 	print d
+		# 	print trajectory[d]
+		# 	print len(trajectory[d])
+		# 	print trajectory[d][0]
+		# 	print len(trajectory[d][0])
 		trajectory[FIELD_DESC].extend(hist)
-
+	# print ""
 	return trajectory
 
 
@@ -422,11 +460,15 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 	toDelete = []
 	for i in range(len(trajectories)): # for each trajectory
 		trajectory = trajectories[i]
-		lastTrackedPt = trajectory[FIELD_PTS][len(trajectory) - 1][FIELD_LOC]
+		if not trajectory[FIELD_FOLLOW]:
+			# this trajectory is complete; do not follow!
+			continue
+		lastTrackedPt = trajectory[FIELD_PTS][-1][FIELD_LOC]
 		# extract the velocity vector from the flow
 		u = uFlowBlurred[lastTrackedPt[0], lastTrackedPt[1]] 
 		v = vFlowBlurred[lastTrackedPt[0], lastTrackedPt[1]]
 		newTrajectoryPt = np.array(lastTrackedPt) + [u,v]
+		newTrajectoryPt = newTrajectoryPt.astype(int)
 		if any(newTrajectoryPt > maxBoundary) or any(newTrajectoryPt < minBoundary):
 			# queue this trajectory for deletion; we need complete ones!
 			toDelete.append(i)
@@ -437,72 +479,98 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 		# calculate descriptors of the slice of the trajectory tube 
 		tubeSlice(ptInfo, frameInfo)
 		trajectory[FIELD_PTS].append(ptInfo)
-		if (i + 1) % TUBE_GRID_T: # end of sub-cell reached
+		if (len(trajectory[FIELD_PTS]) % TUBE_GRID_T) == 0: # end of sub-cell reached
 			collateSlices(trajectory) # combine the histograms in the time dimension
 	# finally delete invalid trajectories
 	for d in toDelete:
-		del trajectories[i]
+		del trajectories[d]
 
 
 
 
-def findDescriptors(videoVol):
+def findTrajectories(videoVol):
 	"""
 	Get HoG, HoF, MBHx and MBHy based descriptors from the video volume.
 	Returns: A 426 dimensional video descriptor vector.
 	"""
 	# start with the first frame
 	frame = videoVol[:,:,0]
-	nxtframe = videoVol[:,:,1]
+	nxtFrame = videoVol[:,:,1]
 	# get all feature points by dense sampling
-	sampledPoints = getDenseSamples(prvFrame)
+	sampledPoints = getDenseSamples(frame)
 	trajectories = initTrajectories(sampledPoints)
 	followTrajectories(frame, nxtFrame, trajectories)
 	_,_,dp = videoVol.shape
-	descriptors = []
 	for f in range(1, dp - 1): # Need 2 frames to calculate optical flow!
 		frame = videoVol[:,:,f]
 		nxtFrame = videoVol[:,:,f + 1]
 		# find trajectory points in the frame
-		followTrajectories(frame, nxtframe, trajectories)
-		for trajectory in trajectories:
+		followTrajectories(frame, nxtFrame, trajectories)
+		toDelete = [] # trajectories to delete
+		frameTrajPts = []
+		for t in range(len(trajectories)):
+			trajectory = trajectories[t]
+			if not trajectory[FIELD_FOLLOW]:
+				# do not follow
+				continue
+			# add the trajectory point in this frame
+			frameTrajPts.append(trajectory[FIELD_PTS][-1][FIELD_LOC])
 			trajDescriptor = None
 			if len(trajectory[FIELD_PTS]) >= TUBE_T: # maximum length reached
-				trajDescriptor = consolidate(trajectory)
-			if trajDescriptor is False: # invalid trajectory
-				continue
-			descriptors.append(trajDescriptor)
-	return descriptors
+				trajDescriptor = consolidateTrajectory(trajectory)
+				if trajDescriptor is False: # invalid trajectory
+					toDelete.append(t)
+				else:
+					# trajectory complete; stop following!
+					trajectory[FIELD_FOLLOW] = False
+		# remove invalid trajectories
+		for d in toDelete:
+			del trajectories[d]
+		# find new points to follow
+		sampledPoints = getDenseSamples(frame, frameTrajPts)
+		trajectories.extend(initTrajectories(sampledPoints))
+	return trajectories
 
 
 
-def extractAndSaveDescriptors(saveLoc, samples):
+def extractAndSaveTrajectories(saveLoc, samples):
 	"""
 	Extract descriptors from video and save to disk.
 	"""
 	for sample in samples:
 		videoLoc, videoName, _ = sample
 		videoVol = loadVideo(videoLoc)
-		stips, videoDesc = findDescriptors(videoVol)
-		np.save(saveLoc + videoName, videoDesc) # save video descriptor to disk	
+		trajectories = findTrajectories(videoVol)
+		trajList = []
+		for trajectory in trajectories:
+			trajList.append(trajectory[FIELD_DESC])
+		np.save(saveLoc + videoName, np.array(trajList)) # save trajectories to disk	
 
 ##########################################################################################
 
 
 def main():
-	trnDescLoc = TRN_VIDDESC
-	tstDescLoc = TST_VIDDESC
-	if not os.path.exists(trnDescLoc):
-		os.makedirs(trnDescLoc)
-	if not os.path.exists(tstDescLoc):
-		os.makedirs(tstDescLoc)
+	# trnDescLoc = TRN_VIDDESC
+	# tstDescLoc = TST_VIDDESC
+	# if not os.path.exists(trnDescLoc):
+	# 	os.makedirs(trnDescLoc)
+	# if not os.path.exists(tstDescLoc):
+	# 	os.makedirs(tstDescLoc)
 
-	trnData = readFiles(TRN_VIDLOC, TRN_FLNAME)
-	tstData = readFiles(TST_VIDLOC, TST_FLNAME)
+	# trnData = readFiles(TRN_VIDLOC, TRN_FLNAME)
+	# tstData = readFiles(TST_VIDLOC, TST_FLNAME)
 		
-	extractAndSaveDescriptors(trnData)
-	extractAndSaveDescriptors(tstData)
-
+	# extractAndSaveTrajectories(trnData)
+	# extractAndSaveTrajectories(tstData)
+	videoLoc = "/home/arc/VA_Assignments/Datasets/dummy.avi"
+	videoVol = loadVideo(videoLoc)
+	trajectories = findTrajectories(videoVol)
+	trajList = []
+	print len(trajectories)
+	for trajectory in trajectories:
+		print len(trajectory[FIELD_DESC]),
+		trajList.append(trajectory[FIELD_DESC])
+	np.save("./trajdummy", np.array(trajList)) # save trajectories to disk
 
 
 if __name__ == '__main__':
