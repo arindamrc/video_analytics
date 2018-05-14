@@ -159,7 +159,7 @@ def getDenseSamples(frame, trackedPts = None):
 
 def getDenseOpticalFlow(curFrame, nxtFrame):
 	"""
-	Uses Farnebacks algorithm to get dense optical flow between frames.
+	Uses Farneback's algorithm to get dense optical flow between frames.
 	Returns: Two matrices that contains the x and y components of 
 	the optical flow respectively.
 	"""
@@ -244,19 +244,20 @@ def findIntegralHistogram(magnitudes, angles, binVals):
 	binCount = len(binVals)
 	binCount = int(binCount)
 	bins = []
-	for i in range(binCount - 1):
+	binSep = abs(binVals[1] - binVals[0]) # assume uniform separation
+	for i in range(binCount):
 		iBin = angles.copy()
 		binVal = binVals[i]
-		iBin = 1.0 - (abs(iBin - binVals[i]) / abs(binVals[i + 1] - binVals[i]))
+		iBin = 1.0 - (abs(iBin - binVals[i]) / binSep)
+
+		if i == 0 and binVals[i] != 0: 
+			# only for the first bin; all votes go to the lowest bin
+			# for values lower than the lowest bin denomination.
+			iBin[angles < binVals[i]] = 1.0
 
 		# discard values not between 0 and 1
 		iBin[abs(iBin) > 1.0] = 0.0
 		iBin[iBin < 0.0] = 0.0
-
-		if i == 0: 
-			# only for the first bin; all votes go to the lowest bin
-			# for values lower than the lowest bin denomination.
-			iBin[iBin < binVals[i]] = 1.0
 
 		# find histogram response from the magnitude
 		iBin = iBin * magnitudes
@@ -383,13 +384,14 @@ def collateSlices(trajectory):
 		for pt in collationSlices: # for each slice
 			allSubcellDesc = pt[d] # contains a histogram per subcell
 			for i in range(len(allSubcellDesc)): # for each histogram of type d in all subcells
-				desc = allSubcellDesc[i]
+				desc = np.ravel(np.array(allSubcellDesc[i]))
 				if len(subcellHistograms[i]) == 0:
-					subcellHistograms[i].append(desc)
+					subcellHistograms[i].extend(desc)
 				else:
-					subcellHistograms[i] = np.array(desc) + subcellHistograms[i]
-		# print len(subcellHistograms)
+					subcellHistograms[i] = desc + subcellHistograms[i]
 		trajectory[d].append(subcellHistograms)
+		# print len(subcellHistograms)
+		# print subcellHistograms
 	# print len(trajectory[d])
 
 
@@ -429,16 +431,8 @@ def consolidateTrajectory(trajectory):
 	trajectory[FIELD_DESC].extend(shapeDesc)
 
 	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
-		# print str(len(trajectory[d])),
 		hist, norm = normalize(np.ravel(np.array(trajectory[d])))
-		# if norm <= EPSILON:
-		# 	print d
-		# 	print trajectory[d]
-		# 	print len(trajectory[d])
-		# 	print trajectory[d][0]
-		# 	print len(trajectory[d][0])
 		trajectory[FIELD_DESC].extend(hist)
-	# print ""
 	return trajectory
 
 
@@ -479,7 +473,7 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 		# calculate descriptors of the slice of the trajectory tube 
 		tubeSlice(ptInfo, frameInfo)
 		trajectory[FIELD_PTS].append(ptInfo)
-		if (len(trajectory[FIELD_PTS]) % TUBE_GRID_T) == 0: # end of sub-cell reached
+		if (len(trajectory[FIELD_PTS]) % int(TUBE_T / TUBE_GRID_T)) == 0: # end of sub-cell reached
 			collateSlices(trajectory) # combine the histograms in the time dimension
 	# finally delete invalid trajectories
 	for d in toDelete:
