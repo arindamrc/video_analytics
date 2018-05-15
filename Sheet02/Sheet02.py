@@ -56,6 +56,8 @@ BINS_HOF = [0,45,90,135,180,225,270,315,360]
 BINS_MBH = [45,90,135,180,225,270,315,360]
 
 
+NP_EXTN = ".npy"
+
 # Some utilities
 
 def loadVideo(location):
@@ -597,7 +599,7 @@ def getFisherVector(trajDescriptors):
 
 
 
-def extractAndSaveTrajectories(saveLoc, samples):
+def extractAndSaveDescriptors(saveLoc, samples):
 	"""
 	Extract descriptors from video and save to disk.
 	"""
@@ -616,36 +618,58 @@ def extractAndSaveTrajectories(saveLoc, samples):
 
 
 
+def loadDescriptors(saveLoc, samples):
+	"""
+	Load saved video descriptors.
+	"""
+	data = []
+	labels = []
+	for sample in samples:
+		_, videoName, label = sample
+		videoDescriptor = np.load(saveLoc + videoName + NP_EXTN)
+		data.append(videoDescriptor)
+		labels.append(label)
+	data = np.concatenate(data)
+	print "data prepared."
+	return data, labels
+
 
 ##########################################################################################
 
 
 def main():
-	# trnDescLoc = TRN_VIDDESC
-	# tstDescLoc = TST_VIDDESC
-	# if not os.path.exists(trnDescLoc):
-	# 	os.makedirs(trnDescLoc)
-	# if not os.path.exists(tstDescLoc):
-	# 	os.makedirs(tstDescLoc)
+	trnDescLoc = TRN_VIDDESC
+	tstDescLoc = TST_VIDDESC
+	svmFile = "classifier.pkl"
+	if not os.path.exists(trnDescLoc):
+		os.makedirs(trnDescLoc)
+	if not os.path.exists(tstDescLoc):
+		os.makedirs(tstDescLoc)
 
-	# trnData = readFiles(TRN_VIDLOC, TRN_FLNAME)
-	# tstData = readFiles(TST_VIDLOC, TST_FLNAME)
+	trnData = readFiles(TRN_VIDLOC, TRN_FLNAME)
+	tstData = readFiles(TST_VIDLOC, TST_FLNAME)
 		
-	# extractAndSaveTrajectories(trnData)
-	# extractAndSaveTrajectories(tstData)
-	videoLoc = "/home/arc/VA_Assignments/Datasets/dummy.avi"
-	videoVol = loadVideo(videoLoc)
-	trajectories = findTrajectories(videoVol)
-	trajList = []
-	print len(trajectories)
-	for trajectory in trajectories:
-		if len(trajectory[FIELD_DESC]) > 0:
-			trajList.append(trajectory[FIELD_DESC])
-	trajDescriptors = reduceDimensions(np.array(trajList), DESC_DIM)
-	FV = getFisherVector(trajDescriptors)
-	print FV.shape
-	print FV
-	np.save("./descdummy", FV) # save trajectories to disk	
+	extractAndSaveDescriptors(trnDescLoc, trnData)
+	extractAndSaveDescriptors(tstDescLoc, tstData)
+
+	svmTrainData, svmTrainLabels = loadDescriptors(trnDescLoc, trnData)
+
+	linearClassifier = svm.LinearSVC()
+	linearClassifier.fit(svmTrainData, svmTrainLabels)
+	joblib.dump(linearClassifier, svmFile)
+	print "trained."
+
+	# linearClassifier = joblib.load(svmFile)
+
+	print "testing..."
+	svmTestData, svmTestLabels = loadDescriptors(tstDescLoc, tstData)
+
+	preds = linearClassifier.predict(svmTestData)
+	acc = 0
+	for (pred, actual) in zip(preds, svmTestLabels):
+		if pred == actual:
+			acc = acc + 1
+	print "accuracy = %f percent" % ((acc * 100.0)/len(svmTestLabels))
 
 
 if __name__ == '__main__':
