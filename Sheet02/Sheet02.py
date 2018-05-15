@@ -8,6 +8,8 @@ import os
 from sklearn.decomposition import PCA
 from sklearn import svm
 from sklearn.externals import joblib
+from sklearn import mixture
+from scipy import linalg
 
 
 # Some constants and parameters
@@ -31,6 +33,7 @@ TRAJ_MAXVAR = 30
 TRAJ_MAXDIS = 20
 EPSILON = 0.000001
 DESC_DIM = 64
+GMM_COMPONENTS_RANGE = range(3, 10)
 
 # Dictionary fields
 FIELD_LOC = "loc"
@@ -543,6 +546,57 @@ def reduceDimensions(trajDescriptors, maxDim):
 	return pca.fit_transform(trajDescriptors)
 
 
+def findGaussianMixtures(X):
+	"""
+	Find the parameters of the GMM based on X.
+	Also finds the ideal number of gaussians. 
+	"""
+	nComponentRange = GMM_COMPONENTS_RANGE
+	minBIC = np.infty
+	bestGMM = None
+	for nComponent in nComponentRange:
+		gmm = mixture.GaussianMixture(n_components = nComponent, covariance_type = "diag")
+		gmm.fit(X)
+		bic = gmm.bic(X)
+		if bic < minBIC:
+			minBIC = bic
+			bestGMM = gmm
+	return bestGMM
+
+
+
+def getFisherVector(trajDescriptors):
+	"""
+	Get a fisher vector representation of a video. 
+	Based on all trajectories found in the video.
+	The trajDescriptors is a 2D numpy array (T x DESC_DIM) with
+	a trajectory descriptor per row. 
+	"""
+	T = len(trajDescriptors) # sample count 
+	gmm = findGaussianMixtures(trajDescriptors)
+	w = gmm.weights_ # 1 x K
+	mu = gmm.means_ # K x DESC_DIM
+	sigma = np.sqrt(gmm.covariances_) # K x DESC_DIM
+	u = gmm.predict_proba(trajDescriptors) # T x K
+	K = len(w) # component count
+	gamma_T_K = u * w # T x K
+	gamma_T_K = gamma_T_K / np.sum(gamma_T_K, axis = 1)[:, None]
+	normedGrad_alpha = (1.0 / np.sqrt(w)) * np.sum(gamma_T_K - w, axis = 0)
+	normedGrad_mu = []
+	normedGrad_sigma = []
+	for k in range(K):
+		normedGrad_mu.append((1.0 / np.sqrt(w[k])) * np.sum(((trajDescriptors - mu[k]) / sigma[k]) * gamma_T_K[:,k][:,np.newaxis], axis = 0))
+		normedGrad_sigma.append((1.0 / np.sqrt(w[k])) * np.sum((((np.square(trajDescriptors - mu[k]) / np.square(sigma[k])) - 1.0) / np.sqrt(2)) * gamma_T_K[:,k][:,np.newaxis], axis = 0))
+	normedGrad_mu = np.array(normedGrad_mu)
+	normedGrad_sigma = np.array(normedGrad_sigma)
+	FV = [] # the fisher vector
+	FV.extend(normedGrad_alpha)
+	FV.extend(np.ravel(normedGrad_mu))
+	FV.extend(np.ravel(normedGrad_sigma))
+	return np.array(FV)
+
+
+
 def extractAndSaveTrajectories(saveLoc, samples):
 	"""
 	Extract descriptors from video and save to disk.
@@ -556,7 +610,9 @@ def extractAndSaveTrajectories(saveLoc, samples):
 			trajList.append(trajectory[FIELD_DESC])
 		trajDescriptors = reduceDimensions(np.array(trajList), DESC_DIM)
 		print trajDescriptors.shape
-		np.save(saveLoc + videoName, trajDescriptors) # save trajectories to disk	
+		FV = getFisherVector(trajDescriptors)
+		print FV.shape
+		np.save(saveLoc + videoName, FV) # save trajectories to disk	
 
 
 
@@ -586,8 +642,10 @@ def main():
 		if len(trajectory[FIELD_DESC]) > 0:
 			trajList.append(trajectory[FIELD_DESC])
 	trajDescriptors = reduceDimensions(np.array(trajList), DESC_DIM)
-	print trajDescriptors.shape
-	np.save("./trajdummy", trajDescriptors) # save trajectories to disk
+	FV = getFisherVector(trajDescriptors)
+	print FV.shape
+	print FV
+	np.save("./descdummy", FV) # save trajectories to disk	
 
 
 if __name__ == '__main__':
