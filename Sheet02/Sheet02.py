@@ -12,13 +12,17 @@ from sklearn import mixture
 from scipy import linalg
 
 
-# Some constants and parameters
+# Some constants 
 TRN_VIDLOC = "/home/arc/VA_Assignments/Datasets/Wiezmann" # training video directory
 TST_VIDLOC = "/home/arc/VA_Assignments/Datasets/Wiezmann"# testing video directory
 TRN_FLNAME = "/home/arc/VA_Assignments/Datasets/Wiezmann/train.txt" # training labels file name
 TST_FLNAME = "/home/arc/VA_Assignments/Datasets/Wiezmann/test.txt" # testing labels file name
-TRN_TRAJDESC  = "./trn_descriptors/" # location to save generated training trajectory descriptors
-TST_TRAJDESC  = "./tst_descriptors/" # location to save generated testing trajectory descriptors
+TRN_TRAJDESC  = "./trn_descriptors_pca/" # location to save generated training trajectory descriptors
+TST_TRAJDESC  = "./tst_descriptors_pca/" # location to save generated testing trajectory descriptors
+TRN_TRAJDESC_PCA = "./trn_descriptors_pca_reduced/" # location to save reduced training trajectory descriptors
+TST_TRAJDESC_PCA = "./trn_descriptors_pca_reduced/" # location to save reduced testing trajectory descriptors
+
+# Some parameters
 CORNERNESS_SCALE = 0.001 # as given in paper
 SAMPLE_STEP = 5 # pixel sample step size (W)
 MEDIANBLUR_KSIZE = 3 # the kernel size for median blur
@@ -34,7 +38,7 @@ TRAJ_MAXDIS = 20 # maximim displacement allowed in trajectories
 TRAJ_MAXDIS_PERCENT = 0.7 # maximum displacement between two consecutive frames as a percentage of overall displacement
 EPSILON = 0.000001 # a small value to prevent division by zero
 DESC_DIM = 64 # the target no. of dimensions for PCA
-GMM_COMPONENTS_RANGE = range(9, 16) # no. of GMM components for testing which is best
+N_GMM_COMPONENTS = 256 # no. of GMM components 
 
 # Dictionary fields
 FIELD_LOC = "loc"
@@ -439,10 +443,10 @@ def consolidateTrajectory(trajectory):
 	trajectory[FIELD_DESC].extend(shapeDesc)
 
 	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
-		hist, norm = normalize(np.ravel(np.array(trajectory[d])))
+		hist = np.ravel(np.array(trajectory[d]))
 		trajectory[FIELD_DESC].extend(hist)
-	# maybe normalization for the entire trajectory descriptor is needed?
-	# should experiment!
+	# normalize the trajectory descriptor
+	trajectory[FIELD_DESC], _ = normalize(trajectory[FIELD_DESC])
 	return trajectory
 
 
@@ -551,7 +555,7 @@ def findTrajectories(videoVol):
 	return trajectories
 
 
-def reduceDimensions(trajDescriptors, maxDim):
+def reduceDimensions(trajDescriptors, maxDim = DESC_DIM):
 	"""
 	Use PCA to reduce the dimension of the trajectory descriptors.
 	The descriptors are passed as a numpy 2D array with one descriptor per row.
@@ -563,19 +567,10 @@ def reduceDimensions(trajDescriptors, maxDim):
 def findGaussianMixtures(X):
 	"""
 	Find the parameters of the GMM based on X.
-	Also finds the ideal number of gaussians using BIC. 
 	"""
-	nComponentRange = GMM_COMPONENTS_RANGE
-	minBIC = np.infty
-	bestGMM = None
-	for nComponent in nComponentRange:
-		gmm = mixture.GaussianMixture(n_components = nComponent, covariance_type = "diag")
-		gmm.fit(X)
-		bic = gmm.bic(X)
-		if bic < minBIC:
-			minBIC = bic
-			bestGMM = gmm
-	return bestGMM
+	gmm = mixture.GaussianMixture(n_components = N_GMM_COMPONENTS, covariance_type = "diag")
+	gmm.fit(X)
+	return gmm
 
 
 
@@ -618,12 +613,13 @@ def extractAndSaveDescriptors(saveLoc, samples, overwrite = False):
 	To regenerate, set overwrite to True.
 	"""
 	total = len(samples)
-	i = 0
+	i = 1
 	for sample in samples:
 		videoLoc, videoName, _ = sample
 		fName = saveLoc + videoName
 		if not overwrite and os.path.exists(fName + NP_EXTN):
 			# don't recalculate saved trajectories
+			print "Already computed: %d out of %d" % (i, total)
 			i = i + 1
 			continue
 		videoVol = loadVideo(videoLoc)
@@ -631,9 +627,10 @@ def extractAndSaveDescriptors(saveLoc, samples, overwrite = False):
 		trajList = []
 		for trajectory in trajectories:
 			trajList.append(trajectory[FIELD_DESC])
-		trajDescriptors = reduceDimensions(np.array(trajList), DESC_DIM)
 		print "Saving %d out of %d" % (i, total)
-		np.save(fName, trajDescriptors) # save trajectories to disk	
+		trajList = np.array(trajList)
+		print trajList.shape
+		np.save(fName, np.array(trajList)) # save trajectories to disk	
 		i = i + 1
 
 
@@ -641,27 +638,35 @@ def extractAndSaveDescriptors(saveLoc, samples, overwrite = False):
 def loadAllTrajectories(saveLoc, samples):
 	"""
 	Load saved trajectory descriptors for all videos into one array.
+	Returns: Combined data and the range of indices for each videos trajectories.
 	"""
 	data = []
+	index = 0
+	videoIndices = []
 	for sample in samples:
 		_, videoName, _ = sample
 		trajDescriptors = np.load(saveLoc + videoName + NP_EXTN)
 		data.append(trajDescriptors)
+		videoIndices.append((index, index + len(trajDescriptors)))
+		index = index + len(trajDescriptors)
 	data = np.concatenate(data)
-	print "gmm data prepared."
-	return data
+	print data.shape
+	print "saved data loaded."
+	return data, videoIndices
 
 
-def getVideoDescriptors(saveLoc, samples, gmm):
+def getVideoDescriptors(samples, reducedTrajectories, videoIndices, gmm):
 	"""
 	Get fisher vector video descriptors from trajectory descriptors
 	using the GMM.
 	"""
 	data = []
 	labels = []
-	for sample in samples:
-		_, videoName, label = sample
-		trajDescriptors = np.load(saveLoc + videoName + NP_EXTN)
+	for i in range(len(samples)):
+		sample = samples[i]
+		start, stop = videoIndices[i]
+		_, _, label = sample
+		trajDescriptors = reducedTrajectories[start:stop]
 		FV = getFisherVector(trajDescriptors, gmm)
 		data.append(FV)
 		labels.append(label)
@@ -670,13 +675,27 @@ def getVideoDescriptors(saveLoc, samples, gmm):
 	return data, labels
 
 
+def saveReducedTrajectories(reducedTrajectories, videoIndices, samples, saveLoc):
+	"""
+	Save PCA reduced trajectories to disk.
+	"""
+	for i in range(len(samples)):
+		videoLoc, videoName, _ = samples[i]
+		fName = saveLoc + videoName
+		start, stop = videoIndices[i]
+		trajDescriptors = reducedTrajectories[start:stop]
+		print "Saving reduced video %d to disk" % (i)
+		np.save(fName, trajDescriptors) # save trajectories to disk	
+
 
 ##########################################################################################
 
 
 def main():
 	trnDescLoc = TRN_TRAJDESC
+	trnDescLoc_pca = TRN_TRAJDESC_PCA
 	tstDescLoc = TST_TRAJDESC
+	tstDescLoc_pca = TST_TRAJDESC_PCA
 	if not os.path.exists(trnDescLoc):
 		os.makedirs(trnDescLoc)
 	if not os.path.exists(tstDescLoc):
@@ -685,25 +704,42 @@ def main():
 	# change the video directory and label file locations 
 	trnData = readFiles(TRN_VIDLOC, TRN_FLNAME)
 	tstData = readFiles(TST_VIDLOC, TST_FLNAME)
-		
-	# extractAndSaveDescriptors(trnDescLoc, trnData)
-	# extractAndSaveDescriptors(tstDescLoc, tstData)
 
-	gmm = findGaussianMixtures(loadAllTrajectories(trnDescLoc, trnData))
+	# trnData = trnData[:3]
+	# tstData = tstData[:2]
+		
+	extractAndSaveDescriptors(trnDescLoc, trnData)
+	extractAndSaveDescriptors(tstDescLoc, tstData)
+
+	# load all saved training trajectories
+	trn_allTrajectories, trn_videoIndices = loadAllTrajectories(trnDescLoc, trnData)
+	# reduce dimensions using PCA
+	trn_reducedTrajectories = reduceDimensions(trn_allTrajectories)
+	# save the reduced trajectories
+	saveReducedTrajectories(trn_reducedTrajectories, trn_videoIndices, trnData, trnDescLoc_pca)
+	# find GMM of the reduced trajectories
+	gmm = findGaussianMixtures(trn_reducedTrajectories)
 	# save the model
 	joblib.dump(gmm, GMM_FILE)
-
-	svmTrainData, svmTrainLabels = getVideoDescriptors(trnDescLoc, trnData, gmm)
+	# get video descriptor using the GMM
+	svmTrainData, svmTrainLabels = getVideoDescriptors(trnData, trn_reducedTrajectories, trn_videoIndices, gmm)
 
 	linearClassifier = svm.LinearSVC()
 	linearClassifier.fit(svmTrainData, svmTrainLabels)
 	joblib.dump(linearClassifier, SVM_FILE)
 	print "trained."
 
+	# load all saved testing trajectories
+	tst_allTrajectories, tst_videoIndices = loadAllTrajectories(tstDescLoc, tstData)
+	# reduce dimensions using PCA
+	tst_reducedTrajectories = reduceDimensions(tst_allTrajectories)
+	# save the reduced trajectories
+	saveReducedTrajectories(tst_reducedTrajectories, tst_videoIndices, tstData, tstDescLoc_pca)
+	# get video descriptor using the GMM
+	svmTestData, svmTestLabels = getVideoDescriptors(tstData, tst_reducedTrajectories, tst_videoIndices, gmm)
 	# linearClassifier = joblib.load(SVM_FILE)
 
 	print "testing..."
-	svmTestData, svmTestLabels = getVideoDescriptors(tstDescLoc, tstData, gmm)
 
 	preds = linearClassifier.predict(svmTestData)
 	acc = 0
