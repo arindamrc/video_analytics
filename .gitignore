@@ -4,3 +4,4 @@ tmp.txt
 va2018_env/
 **/*.pkl
 **/*.tex
+./submissions/*

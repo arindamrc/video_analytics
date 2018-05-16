@@ -13,27 +13,28 @@ from scipy import linalg
 
 
 # Some constants and parameters
-TRN_VIDLOC = "/home/arc/VA_Assignments/Datasets/Wiezmann"
-TST_VIDLOC = "/home/arc/VA_Assignments/Datasets/Wiezmann"
-TRN_FLNAME = "/home/arc/VA_Assignments/Datasets/Wiezmann/train.txt"
-TST_FLNAME = "/home/arc/VA_Assignments/Datasets/Wiezmann/test.txt"
-TRN_VIDDESC  = "./trn_descriptors/"
-TST_VIDDESC  = "./tst_descriptors/"
-CORNERNESS_SCALE = 0.001
-SAMPLE_STEP = 5
-MEDIANBLUR_KSIZE = 3
-TUBE_T = 15
-TUBE_X = 32
-TUBE_Y = 32
-TUBE_GRID_X = 2
-TUBE_GRID_Y = 2
-TUBE_GRID_T = 3
-TRAJ_MINVAR = 1.732050807568877
-TRAJ_MAXVAR = 30
-TRAJ_MAXDIS = 20
-EPSILON = 0.000001
-DESC_DIM = 64
-GMM_COMPONENTS_RANGE = range(3, 10)
+TRN_VIDLOC = "/home/arc/VA_Assignments/Datasets/Wiezmann" # training video directory
+TST_VIDLOC = "/home/arc/VA_Assignments/Datasets/Wiezmann"# testing video directory
+TRN_FLNAME = "/home/arc/VA_Assignments/Datasets/Wiezmann/train.txt" # training labels file name
+TST_FLNAME = "/home/arc/VA_Assignments/Datasets/Wiezmann/test.txt" # testing labels file name
+TRN_TRAJDESC  = "./trn_descriptors/" # location to save generated training trajectory descriptors
+TST_TRAJDESC  = "./tst_descriptors/" # location to save generated testing trajectory descriptors
+CORNERNESS_SCALE = 0.001 # as given in paper
+SAMPLE_STEP = 5 # pixel sample step size (W)
+MEDIANBLUR_KSIZE = 3 # the kernel size for median blur
+TRAJVOL_T = 15 # the length of the trajectory volume (L)
+TRAJVOL_X = 32 # the width of the trajectory volume (N)
+TRAJVOL_Y = 32 # the height of the trajectory volume (N)
+TUBE_GRID_X = 2 # grid width of trajectory volume (n_sigma)
+TUBE_GRID_Y = 2 # grid height of trajectory volume (n_sigma)
+TUBE_GRID_T = 3 # grid depth of trajectory volume (n_tau)
+TRAJ_MINVAR = 1.732050807568877 # minimum variance in trajectory allowed to remove static trajectories
+TRAJ_MAXVAR = 30 # maximum variance to remove random trajectories
+TRAJ_MAXDIS = 20 # maximim displacement allowed in trajectories
+TRAJ_MAXDIS_PERCENT = 0.7 # maximum displacement between two consecutive frames as a percentage of overall displacement
+EPSILON = 0.000001 # a small value to prevent division by zero
+DESC_DIM = 64 # the target no. of dimensions for PCA
+GMM_COMPONENTS_RANGE = range(9, 16) # no. of GMM components for testing which is best
 
 # Dictionary fields
 FIELD_LOC = "loc"
@@ -158,7 +159,7 @@ def getDenseSamples(frame, trackedPts = None):
 		for pt in trackedPts:
 			tl = clip2DPoint(pt - [int(SAMPLE_STEP / 2), int(SAMPLE_STEP / 2)], [0,w], [0,h])
 			br = clip2DPoint(pt + [int(SAMPLE_STEP / 2), int(SAMPLE_STEP / 2)], [0,w], [0,h])
-			mask[tl[0]:br[0], tl[1]:br[1]] = 0 # don'T sample in the neighborhood of tracked points
+			mask[tl[0]:br[0], tl[1]:br[1]] = 0 # don't sample in the neighborhood of tracked points
 	# apply the mask; element-wise multiplication
 	cornerResponses = cornerResponses * mask
 	# choose those locations which are still non-zero
@@ -236,7 +237,6 @@ def getMagnitudeAndAngle(x, y):
 	"""
 	Get the magnitude and angle of vectors from their x and y components.
 	"""
-	# mag, ang = cv2.cartToPolar(x,y)
 	mag = np.sqrt((x * x + y * y)) # the gradient magnitude
 	ang = np.arctan2(y, x) * 180 + np.pi
 	ang[ang < 0] = ang[ang < 0] + 360 # the gradient angle (0 to 360 degrees)
@@ -249,15 +249,14 @@ def findIntegralHistogram(magnitudes, angles, binVals):
 	"""
 	Interpolate and find the contribution of each pixel 
 	towards the histogram bins. Calculate the integral of
-	this histogram bins for ease of computation.
+	this histogram's bins for ease of computation.
 	"""
 	binCount = len(binVals)
 	binCount = int(binCount)
 	bins = []
-	binSep = abs(binVals[1] - binVals[0]) # assume uniform separation
+	binSep = abs(binVals[1] - binVals[0]) # assume uniform bin separation
 	for i in range(binCount):
 		iBin = angles.copy()
-		binVal = binVals[i]
 		iBin = 1.0 - (abs(iBin - binVals[i]) / binSep)
 
 		if i == 0 and binVals[i] != 0: 
@@ -288,6 +287,9 @@ def applyMedianBlur(uFlow, vFlow):
 
 
 def getAllIntegralHistograms(frame, uFlow, vFlow):
+	"""
+	Get all integral histograms of intensity gradient, flow and flow gradients.
+	"""
 	pixGradX, pixGradY = getGradients(frame)
 	uMBHX, uMBHY = getGradients(uFlow)
 	vMBHX, vMBHY = getGradients(vFlow)
@@ -312,8 +314,6 @@ def initFrame(curFrame, nxtFrame):
 	Everything is wrapped up in a dictionary structure for subsequent use.
 	"""
 	uFlow, vFlow = getDenseOpticalFlow(curFrame, nxtFrame)
-	minBoundary = [0,0] 
-	maxBoundary = [len(curFrame), len(curFrame[0]) - 1]
 	# apply median filter to optical flow
 	uFlowBlurred, vFlowBlurred = applyMedianBlur(uFlow, vFlow)
 
@@ -356,21 +356,20 @@ def tubeSlice(ptInfo, frameInfo):
 	"""
 	pt = ptInfo[FIELD_LOC]
 	# get the top-left point of the slice
-	tubeTL = pt - [int(TUBE_X / 2), int(TUBE_Y / 2)]
-	dx = int(TUBE_X / TUBE_GRID_X)
-	dy = int(TUBE_Y / TUBE_GRID_Y)
+	tubeTL = pt - [int(TRAJVOL_X / 2), int(TRAJVOL_Y / 2)]
+	# calculate the tube's spatial dimensions
+	dx = int(TRAJVOL_X / TUBE_GRID_X)
+	dy = int(TRAJVOL_Y / TUBE_GRID_Y)
 	for col in range(TUBE_GRID_X):
 		for row in range(TUBE_GRID_Y):
-			# find the four boundary points of the cell
+			# find the four boundary points of the cell.
 			# perform modulo division to ensure the cell
-			# doesn't overshoot the frame boundaries
+			# doesn't overshoot the frame boundaries.
 			cellTL = clip2DPoint(tubeTL + [row * dy, col * dx], [0, frameInfo[FIELD_HEIGHT]], [0, frameInfo[FIELD_WIDTH]]).astype(int)
 			cellBR = tuple(clip2DPoint(cellTL + [dy, dx], [0, frameInfo[FIELD_HEIGHT]], [0, frameInfo[FIELD_WIDTH]]).astype(int))
 			cellTR = tuple(clip2DPoint(cellTL + [0, col * dx], [0, frameInfo[FIELD_HEIGHT]], [0, frameInfo[FIELD_WIDTH]]).astype(int))
 			cellBL = tuple(clip2DPoint(cellTL + [row * dy, 0], [0, frameInfo[FIELD_HEIGHT]], [0, frameInfo[FIELD_WIDTH]]).astype(int))
 			cellTL = tuple(cellTL)
-			# print cellTL, cellBR, cellTR, cellBL
-			# print frameInfo[FIELD_HEIGHT], frameInfo[FIELD_WIDTH]
 			# for all integral histograms
 			for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
 				desc = frameInfo[d]
@@ -379,14 +378,14 @@ def tubeSlice(ptInfo, frameInfo):
 					# get the bin contribution
 					contrib = b[cellBR] - b[cellTR] - b[cellBL] + b[cellTL]
 					hist.append(contrib) # append contributions in bin order
-				ptInfo[d].append(hist)
+				ptInfo[d].append(hist) # the histogram contributions of this point for this frame
 		cellTL = tubeTL
 	return
 
  
 def collateSlices(trajectory):
 	"""
-	Collate the histogram of last TUBE_GRID_T slices.
+	Collate the histogram of last TRAJVOL_T/TUBE_GRID_T slices.
 	"""
 	collationSlices = trajectory[FIELD_PTS][-TUBE_GRID_T:] # take from the end
 	# initialize sub-cell histograms
@@ -430,7 +429,7 @@ def consolidateTrajectory(trajectory):
 	if maxSegLen > TRAJ_MAXDIS:
 		# trajectory overshoots maximum displacement limit
 		return False
-	if maxSegLen > 0.7 * trajLen: 
+	if maxSegLen > TRAJ_MAXDIS_PERCENT * trajLen: 
 		# displacement between consecutive frames too large
 		return False
 
@@ -442,6 +441,8 @@ def consolidateTrajectory(trajectory):
 	for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
 		hist, norm = normalize(np.ravel(np.array(trajectory[d])))
 		trajectory[FIELD_DESC].extend(hist)
+	# maybe normalization for the entire trajectory descriptor is needed?
+	# should experiment!
 	return trajectory
 
 
@@ -457,7 +458,7 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 	uFlow = frameInfo[FIELD_UFLOW] 
 	vFlow = frameInfo[FIELD_VFLOW]
 	minBoundary = [0,0] 
-	maxBoundary = [len(curFrame), len(curFrame[0]) - 1]
+	maxBoundary = [len(curFrame) - 1, len(curFrame[0]) - 1]
 	# apply median filter to optical flow
 	uFlowBlurred, vFlowBlurred = applyMedianBlur(uFlow, vFlow)
 
@@ -487,7 +488,7 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 		# calculate descriptors of the slice of the trajectory tube 
 		tubeSlice(ptInfo, frameInfo)
 		trajectory[FIELD_PTS].append(ptInfo)
-		if (len(trajectory[FIELD_PTS]) % int(TUBE_T / TUBE_GRID_T)) == 0: # end of sub-cell reached
+		if (len(trajectory[FIELD_PTS]) % int(TRAJVOL_T / TUBE_GRID_T)) == 0: # end of sub-cell reached
 			collateSlices(trajectory) # combine the histograms in the time dimension
 	# finally delete invalid trajectories
 	for d in toDelete[::-1]:
@@ -498,8 +499,8 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 
 def findTrajectories(videoVol):
 	"""
-	Get HoG, HoF, MBHx and MBHy based descriptors from the video volume.
-	Returns: A 426 dimensional video descriptor vector.
+	Get HoG, HoF, MBHx and MBHy based trajectory descriptors from the video volume.
+	Returns: A 426 dimensional descriptor vector per trajectory.
 	"""
 	# start with the first frame
 	frame = videoVol[:,:,0]
@@ -524,7 +525,7 @@ def findTrajectories(videoVol):
 			# add the trajectory point in this frame
 			frameTrajPts.append(trajectory[FIELD_PTS][-1][FIELD_LOC])
 			trajDescriptor = None
-			if len(trajectory[FIELD_PTS]) >= TUBE_T: # maximum length reached
+			if len(trajectory[FIELD_PTS]) >= TRAJVOL_T: # maximum length reached
 				trajDescriptor = consolidateTrajectory(trajectory)
 				if trajDescriptor is False: # invalid trajectory
 					toDelete.append(t)
@@ -562,7 +563,7 @@ def reduceDimensions(trajDescriptors, maxDim):
 def findGaussianMixtures(X):
 	"""
 	Find the parameters of the GMM based on X.
-	Also finds the ideal number of gaussians. 
+	Also finds the ideal number of gaussians using BIC. 
 	"""
 	nComponentRange = GMM_COMPONENTS_RANGE
 	minBIC = np.infty
@@ -606,21 +607,22 @@ def getFisherVector(trajDescriptors, gmm):
 	FV.extend(np.ravel(normedGrad_mu))
 	FV.extend(np.ravel(normedGrad_sigma))
 	FV = np.array(FV)
-	FV = FV / T
+	FV = normalize(FV / T)[0]
 	return FV
 
 
 
-def extractAndSaveDescriptors(saveLoc, samples):
+def extractAndSaveDescriptors(saveLoc, samples, overwrite = False):
 	"""
 	Extract descriptors from video and save to disk.
+	To regenerate, set overwrite to True.
 	"""
 	total = len(samples)
 	i = 0
 	for sample in samples:
 		videoLoc, videoName, _ = sample
 		fName = saveLoc + videoName
-		if os.path.exists(fName + NP_EXTN):
+		if not overwrite and os.path.exists(fName + NP_EXTN):
 			# don't recalculate saved trajectories
 			i = i + 1
 			continue
@@ -661,13 +663,10 @@ def getVideoDescriptors(saveLoc, samples, gmm):
 		_, videoName, label = sample
 		trajDescriptors = np.load(saveLoc + videoName + NP_EXTN)
 		FV = getFisherVector(trajDescriptors, gmm)
-		print FV.shape
 		data.append(FV)
 		labels.append(label)
 	data = np.array(data)
 	labels = np.array(labels)
-	print data.shape
-	print labels.shape
 	return data, labels
 
 
@@ -676,20 +675,19 @@ def getVideoDescriptors(saveLoc, samples, gmm):
 
 
 def main():
-	trnDescLoc = TRN_VIDDESC
-	tstDescLoc = TST_VIDDESC
+	trnDescLoc = TRN_TRAJDESC
+	tstDescLoc = TST_TRAJDESC
 	if not os.path.exists(trnDescLoc):
 		os.makedirs(trnDescLoc)
 	if not os.path.exists(tstDescLoc):
 		os.makedirs(tstDescLoc)
 
+	# change the video directory and label file locations 
 	trnData = readFiles(TRN_VIDLOC, TRN_FLNAME)
 	tstData = readFiles(TST_VIDLOC, TST_FLNAME)
 		
-	extractAndSaveDescriptors(trnDescLoc, trnData)
-	extractAndSaveDescriptors(tstDescLoc, tstData)
-
-	print trnData[:2]
+	# extractAndSaveDescriptors(trnDescLoc, trnData)
+	# extractAndSaveDescriptors(tstDescLoc, tstData)
 
 	gmm = findGaussianMixtures(loadAllTrajectories(trnDescLoc, trnData))
 	# save the model
