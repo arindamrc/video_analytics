@@ -20,7 +20,7 @@ TST_FLNAME = "/home/arc/VA_Assignments/Datasets/Wiezmann/test.txt" # testing lab
 TRN_TRAJDESC  = "./trn_descriptors_pca/" # location to save generated training trajectory descriptors
 TST_TRAJDESC  = "./tst_descriptors_pca/" # location to save generated testing trajectory descriptors
 TRN_TRAJDESC_PCA = "./trn_descriptors_pca_reduced/" # location to save reduced training trajectory descriptors
-TST_TRAJDESC_PCA = "./trn_descriptors_pca_reduced/" # location to save reduced testing trajectory descriptors
+TST_TRAJDESC_PCA = "./tst_descriptors_pca_reduced/" # location to save reduced testing trajectory descriptors
 
 # Some parameters
 CORNERNESS_SCALE = 0.001 # as given in paper
@@ -64,6 +64,7 @@ BINS_MBH = [45,90,135,180,225,270,315,360]
 NP_EXTN = ".npy"
 SVM_FILE = "classifier.pkl"
 GMM_FILE = "gmm.pkl"
+PCA_FILE = "pca.pkl"
 
 # Some utilities
 
@@ -135,6 +136,15 @@ def readFiles(videoDir, labelFile):
 			vidLbl = vidLbl[:-extnLen] # remove the '.avi' extension
 			samples.append((path, vidLbl, lbl))
 	return samples
+
+
+def checkAndMakeDirectories(*args):
+	"""
+	Check if directory already exists. If not, create it.
+	"""
+	for arg in args:
+		if not os.path.exists(arg):
+			os.makedirs(arg)
 
 
 ##########################################################################################
@@ -559,9 +569,10 @@ def reduceDimensions(trajDescriptors, maxDim = DESC_DIM):
 	"""
 	Use PCA to reduce the dimension of the trajectory descriptors.
 	The descriptors are passed as a numpy 2D array with one descriptor per row.
+	Returns the dimensionality ruduced data and the model.
 	"""
 	pca = PCA(n_components = maxDim)
-	return pca.fit_transform(trajDescriptors)
+	return pca.fit_transform(trajDescriptors), pca
 
 
 def findGaussianMixtures(X):
@@ -675,13 +686,18 @@ def getVideoDescriptors(samples, reducedTrajectories, videoIndices, gmm):
 	return data, labels
 
 
-def saveReducedTrajectories(reducedTrajectories, videoIndices, samples, saveLoc):
+def saveReducedTrajectories(reducedTrajectories, videoIndices, samples, saveLoc, overwrite = False):
 	"""
 	Save PCA reduced trajectories to disk.
 	"""
+	total = len(reducedTrajectories)
 	for i in range(len(samples)):
 		videoLoc, videoName, _ = samples[i]
 		fName = saveLoc + videoName
+		if not overwrite and os.path.exists(fName + NP_EXTN):
+			# don't recalculate saved trajectories
+			print "Already saved: %d out of %d" % (i+1, total)
+			continue
 		start, stop = videoIndices[i]
 		trajDescriptors = reducedTrajectories[start:stop]
 		print "Saving reduced video %d to disk" % (i)
@@ -696,29 +712,26 @@ def main():
 	trnDescLoc_pca = TRN_TRAJDESC_PCA
 	tstDescLoc = TST_TRAJDESC
 	tstDescLoc_pca = TST_TRAJDESC_PCA
-	if not os.path.exists(trnDescLoc):
-		os.makedirs(trnDescLoc)
-	if not os.path.exists(tstDescLoc):
-		os.makedirs(tstDescLoc)
+	checkAndMakeDirectories(trnDescLoc, trnDescLoc_pca, tstDescLoc, tstDescLoc_pca)
 
 	# change the video directory and label file locations 
 	trnData = readFiles(TRN_VIDLOC, TRN_FLNAME)
 	tstData = readFiles(TST_VIDLOC, TST_FLNAME)
 
-	# trnData = trnData[:3]
-	# tstData = tstData[:2]
-		
 	extractAndSaveDescriptors(trnDescLoc, trnData)
 	extractAndSaveDescriptors(tstDescLoc, tstData)
 
 	# load all saved training trajectories
 	trn_allTrajectories, trn_videoIndices = loadAllTrajectories(trnDescLoc, trnData)
 	# reduce dimensions using PCA
-	trn_reducedTrajectories = reduceDimensions(trn_allTrajectories)
+	trn_reducedTrajectories, pca = reduceDimensions(trn_allTrajectories)
+	# save the pca model
+	joblib.dump(pca, PCA_FILE)
 	# save the reduced trajectories
 	saveReducedTrajectories(trn_reducedTrajectories, trn_videoIndices, trnData, trnDescLoc_pca)
 	# find GMM of the reduced trajectories
 	gmm = findGaussianMixtures(trn_reducedTrajectories)
+	# gmm = joblib.load(GMM_FILE)
 	# save the model
 	joblib.dump(gmm, GMM_FILE)
 	# get video descriptor using the GMM
@@ -727,12 +740,13 @@ def main():
 	linearClassifier = svm.LinearSVC()
 	linearClassifier.fit(svmTrainData, svmTrainLabels)
 	joblib.dump(linearClassifier, SVM_FILE)
+	# linearClassifier = joblib.load(SVM_FILE)
 	print "trained."
 
 	# load all saved testing trajectories
 	tst_allTrajectories, tst_videoIndices = loadAllTrajectories(tstDescLoc, tstData)
-	# reduce dimensions using PCA
-	tst_reducedTrajectories = reduceDimensions(tst_allTrajectories)
+	# reduce dimensions using previously computed PCA model
+	tst_reducedTrajectories = pca.transform(tst_allTrajectories)
 	# save the reduced trajectories
 	saveReducedTrajectories(tst_reducedTrajectories, tst_videoIndices, tstData, tstDescLoc_pca)
 	# get video descriptor using the GMM
