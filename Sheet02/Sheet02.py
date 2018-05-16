@@ -55,8 +55,10 @@ BINS_HOG = [45,90,135,180,225,270,315,360]
 BINS_HOF = [0,45,90,135,180,225,270,315,360]
 BINS_MBH = [45,90,135,180,225,270,315,360]
 
-
+# other things
 NP_EXTN = ".npy"
+SVM_FILE = "classifier.pkl"
+GMM_FILE = "gmm.pkl"
 
 # Some utilities
 
@@ -114,22 +116,24 @@ def readFiles(videoDir, labelFile):
 	"""
 	space = " "
 	samples = []
-	end_slash = videoDir.endswith("/")
-	len_extn = len(".avi")
+	endSlash = videoDir.endswith("/")
+	extnLen = len(".avi")
 	with open(labelFile, "r") as f_labels:
 		for line in f_labels:
 			relPath,lbl = line.split(space)
 			lbl = int(lbl)
-			if end_slash:
+			if endSlash:
 				path = videoDir + relPath
 			else:
 				path = videoDir + "/" + relPath
-			vid_lbl = relPath.replace("/", "_")
-			vid_lbl = vid_lbl[:-len_extn] # remove the '.avi' extension
-			samples.append((path, vid_lbl, lbl))
+			vidLbl = relPath.replace("/", "_")
+			vidLbl = vidLbl[:-extnLen] # remove the '.avi' extension
+			samples.append((path, vidLbl, lbl))
 	return samples
 
+
 ##########################################################################################
+
 
 def getDenseSamples(frame, trackedPts = None):
 	"""
@@ -360,11 +364,13 @@ def tubeSlice(ptInfo, frameInfo):
 			# find the four boundary points of the cell
 			# perform modulo division to ensure the cell
 			# doesn't overshoot the frame boundaries
-			cellTL = clip2DPoint(tubeTL + [row * dy, col * dx], [0, frameInfo[FIELD_WIDTH]], [0, frameInfo[FIELD_HEIGHT]]).astype(int)
-			cellBR = tuple(clip2DPoint(cellTL + [dy, dx], [0, frameInfo[FIELD_WIDTH]], [0, frameInfo[FIELD_HEIGHT]]).astype(int))
-			cellTR = tuple(clip2DPoint(cellTL + [0, col * dx], [0, frameInfo[FIELD_WIDTH]], [0, frameInfo[FIELD_HEIGHT]]).astype(int))
-			cellBL = tuple(clip2DPoint(cellTL + [row * dy, 0], [0, frameInfo[FIELD_WIDTH]], [0, frameInfo[FIELD_HEIGHT]]).astype(int))
+			cellTL = clip2DPoint(tubeTL + [row * dy, col * dx], [0, frameInfo[FIELD_HEIGHT]], [0, frameInfo[FIELD_WIDTH]]).astype(int)
+			cellBR = tuple(clip2DPoint(cellTL + [dy, dx], [0, frameInfo[FIELD_HEIGHT]], [0, frameInfo[FIELD_WIDTH]]).astype(int))
+			cellTR = tuple(clip2DPoint(cellTL + [0, col * dx], [0, frameInfo[FIELD_HEIGHT]], [0, frameInfo[FIELD_WIDTH]]).astype(int))
+			cellBL = tuple(clip2DPoint(cellTL + [row * dy, 0], [0, frameInfo[FIELD_HEIGHT]], [0, frameInfo[FIELD_WIDTH]]).astype(int))
 			cellTL = tuple(cellTL)
+			# print cellTL, cellBR, cellTR, cellBL
+			# print frameInfo[FIELD_HEIGHT], frameInfo[FIELD_WIDTH]
 			# for all integral histograms
 			for d in [FIELD_HOG, FIELD_HOF, FIELD_MBHx, FIELD_MBHy]:
 				desc = frameInfo[d]
@@ -448,7 +454,8 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 	trajectory points.
 	"""
 	frameInfo = initFrame(curFrame, nxtFrame)
-	uFlow, vFlow = getDenseOpticalFlow(frameInfo[FIELD_UFLOW], frameInfo[FIELD_VFLOW])
+	uFlow = frameInfo[FIELD_UFLOW] 
+	vFlow = frameInfo[FIELD_VFLOW]
 	minBoundary = [0,0] 
 	maxBoundary = [len(curFrame), len(curFrame[0]) - 1]
 	# apply median filter to optical flow
@@ -461,6 +468,10 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 			# this trajectory is complete; do not follow!
 			continue
 		lastTrackedPt = trajectory[FIELD_PTS][-1][FIELD_LOC]
+		if not all(lastTrackedPt < uFlowBlurred.shape):
+			# this trajectory goes beyond the image boundary
+			toDelete.append(i)
+			continue
 		# extract the velocity vector from the flow
 		u = uFlowBlurred[lastTrackedPt[0], lastTrackedPt[1]] 
 		v = vFlowBlurred[lastTrackedPt[0], lastTrackedPt[1]]
@@ -479,7 +490,7 @@ def followTrajectories(curFrame, nxtFrame, trajectories):
 		if (len(trajectory[FIELD_PTS]) % int(TUBE_T / TUBE_GRID_T)) == 0: # end of sub-cell reached
 			collateSlices(trajectory) # combine the histograms in the time dimension
 	# finally delete invalid trajectories
-	for d in toDelete:
+	for d in toDelete[::-1]:
 		del trajectories[d]
 
 
@@ -567,7 +578,7 @@ def findGaussianMixtures(X):
 
 
 
-def getFisherVector(trajDescriptors):
+def getFisherVector(trajDescriptors, gmm):
 	"""
 	Get a fisher vector representation of a video. 
 	Based on all trajectories found in the video.
@@ -575,7 +586,6 @@ def getFisherVector(trajDescriptors):
 	a trajectory descriptor per row. 
 	"""
 	T = len(trajDescriptors) # sample count 
-	gmm = findGaussianMixtures(trajDescriptors)
 	w = gmm.weights_ # 1 x K
 	mu = gmm.means_ # K x DESC_DIM
 	sigma = np.sqrt(gmm.covariances_) # K x DESC_DIM
@@ -595,7 +605,9 @@ def getFisherVector(trajDescriptors):
 	FV.extend(normedGrad_alpha)
 	FV.extend(np.ravel(normedGrad_mu))
 	FV.extend(np.ravel(normedGrad_sigma))
-	return np.array(FV)
+	FV = np.array(FV)
+	FV = FV / T
+	return FV
 
 
 
@@ -603,35 +615,61 @@ def extractAndSaveDescriptors(saveLoc, samples):
 	"""
 	Extract descriptors from video and save to disk.
 	"""
+	total = len(samples)
+	i = 0
 	for sample in samples:
 		videoLoc, videoName, _ = sample
+		fName = saveLoc + videoName
+		if os.path.exists(fName + NP_EXTN):
+			# don't recalculate saved trajectories
+			i = i + 1
+			continue
 		videoVol = loadVideo(videoLoc)
 		trajectories = findTrajectories(videoVol)
 		trajList = []
 		for trajectory in trajectories:
 			trajList.append(trajectory[FIELD_DESC])
 		trajDescriptors = reduceDimensions(np.array(trajList), DESC_DIM)
-		print trajDescriptors.shape
-		FV = getFisherVector(trajDescriptors)
-		print FV.shape
-		np.save(saveLoc + videoName, FV) # save trajectories to disk	
+		print "Saving %d out of %d" % (i, total)
+		np.save(fName, trajDescriptors) # save trajectories to disk	
+		i = i + 1
 
 
 
-def loadDescriptors(saveLoc, samples):
+def loadAllTrajectories(saveLoc, samples):
 	"""
-	Load saved video descriptors.
+	Load saved trajectory descriptors for all videos into one array.
+	"""
+	data = []
+	for sample in samples:
+		_, videoName, _ = sample
+		trajDescriptors = np.load(saveLoc + videoName + NP_EXTN)
+		data.append(trajDescriptors)
+	data = np.concatenate(data)
+	print "gmm data prepared."
+	return data
+
+
+def getVideoDescriptors(saveLoc, samples, gmm):
+	"""
+	Get fisher vector video descriptors from trajectory descriptors
+	using the GMM.
 	"""
 	data = []
 	labels = []
 	for sample in samples:
 		_, videoName, label = sample
-		videoDescriptor = np.load(saveLoc + videoName + NP_EXTN)
-		data.append(videoDescriptor)
+		trajDescriptors = np.load(saveLoc + videoName + NP_EXTN)
+		FV = getFisherVector(trajDescriptors, gmm)
+		print FV.shape
+		data.append(FV)
 		labels.append(label)
-	data = np.concatenate(data)
-	print "data prepared."
+	data = np.array(data)
+	labels = np.array(labels)
+	print data.shape
+	print labels.shape
 	return data, labels
+
 
 
 ##########################################################################################
@@ -640,7 +678,6 @@ def loadDescriptors(saveLoc, samples):
 def main():
 	trnDescLoc = TRN_VIDDESC
 	tstDescLoc = TST_VIDDESC
-	svmFile = "classifier.pkl"
 	if not os.path.exists(trnDescLoc):
 		os.makedirs(trnDescLoc)
 	if not os.path.exists(tstDescLoc):
@@ -652,17 +689,23 @@ def main():
 	extractAndSaveDescriptors(trnDescLoc, trnData)
 	extractAndSaveDescriptors(tstDescLoc, tstData)
 
-	svmTrainData, svmTrainLabels = loadDescriptors(trnDescLoc, trnData)
+	print trnData[:2]
+
+	gmm = findGaussianMixtures(loadAllTrajectories(trnDescLoc, trnData))
+	# save the model
+	joblib.dump(gmm, GMM_FILE)
+
+	svmTrainData, svmTrainLabels = getVideoDescriptors(trnDescLoc, trnData, gmm)
 
 	linearClassifier = svm.LinearSVC()
 	linearClassifier.fit(svmTrainData, svmTrainLabels)
-	joblib.dump(linearClassifier, svmFile)
+	joblib.dump(linearClassifier, SVM_FILE)
 	print "trained."
 
-	# linearClassifier = joblib.load(svmFile)
+	# linearClassifier = joblib.load(SVM_FILE)
 
 	print "testing..."
-	svmTestData, svmTestLabels = loadDescriptors(tstDescLoc, tstData)
+	svmTestData, svmTestLabels = getVideoDescriptors(tstDescLoc, tstData, gmm)
 
 	preds = linearClassifier.predict(svmTestData)
 	acc = 0
