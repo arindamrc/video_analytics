@@ -1,0 +1,317 @@
+Two-Stream Convolutional Networks for Action Recognition in Videos
+
+Karen Simonyan
+ Andrew Zisserman
+
+
+The spatial stream performs action recognition from still video
+frames, whilst the temporal stream is trained to recognise action from motion in the form of dense
+optical flow. Both streams are implemented as ConvNets. 
+
+Our temporal stream ConvNet operates on multiple-frame dense optical flow, which is typically
+computed in an energy minimisation framework by solving for a displacement field (typically at
+multiple image scales). We used a popular method of [2], which formulates the energy based on
+constancy assumptions for intensity and its gradient, as well as smoothness of the displacement field.
+Recently, [30] proposed an image patch matching scheme, which is reminiscent of deep ConvNets,
+but does not incorporate learning.
+
+Video can naturally be decomposed into spatial and temporal components. The spatial part, in the
+form of individual frame appearance, carries information about scenes and objects depicted in the
+video. The temporal part, in the form of motion across the frames, conveys the movement of the
+observer (the camera) and the objects. 
+
+Spatial stream ConvNet:
+operates on individual video frames, effectively performing action recog-
+nition from still images.  The static appearance by itself is a useful clue, since some actions are strongly associated with particular objects. In fact, as will be shown in Sect. 6, action classification
+from still frames (the spatial recognition stream) is fairly competitive on its own. Since a spatial
+ConvNet is essentially an image classification architecture, we can build upon the recent advances
+in large-scale image recognition methods [15], and pre-train the network on a large image classifica-
+tion dataset, such as the ImageNet challenge dataset. 
+
+Optical flow ConvNets:
+Unlike the ConvNet models, reviewed in Sect. 1.1, the input to our model is
+formed by stacking optical flow displacement fields between several consecutive frames. Such input
+explicitly describes the motion between video frames, which makes the recognition easier, as the
+network does not need to estimate motion implicitly.
+
+Optical flow stacking: A dense optical flow can be seen as a set of displacement vector fields dt
+between the pairs of consecutive frames t and t + 1. By dt(u, v) we denote the displacement vector
+at the point (u, v) in frame t, which moves the point to the corresponding point in the following
+frame t + 1. The horizontal and vertical components of the vector field, dxt and dyt , can be seen
+as image channels (shown in Fig. 2), well suited to recognition using a convolutional network. To
+x,y
+represent the motion across a sequence of frames, we stack the flow channels d of L consecutive
+t
+frames to form a total of 2L input channels. More formally, let w and h be the width and height
+w×h×2Lof a video; a ConvNet input volume Iτ ∈ R for an arbitrary frame τ is then constructed as
+follows:
+Iτ (u, v, 2k − 1) = dxτ +k−1 (u, v)
+Iτ (u, v, 2k) =
+ dyτ +k−1 (u, v),
+ u = [1; w], v = [1; h], k = [1; L].
+For an arbitrary point (u, v), the channels Iτ (u, v, c), c = [1; 2L] encode the motion at that point
+over a sequence of L frames
+
+Trajectory stacking: An alternative motion representation, inspired by the trajectory-based de-
+scriptors [29], replaces the optical flow, sampled at the same locations across several frames, with the flow, sampled along the motion trajectories. In this case, the input volume Iτ , corresponding to
+a frame τ , takes the following form:
+Iτ (u, v, 2k − 1) = dxτ +k−1(pk ),
+Iτ (u, v, 2k) = dyτ +k−1 (pk ),
+ u = [1; w], v = [1; h], k = [1; L].
+(2)
+where pk is the k-th point along the trajectory, which starts at the location (u, v) in the frame τ and
+is defined by the following recurrence relation:
+p1 = (u, v);
+ pk = pk−1 + dτ +k−2 (pk−1 ), k > 1.
+Compared to the input volume representation (1), where the channels Iτ (u, v, c) store the displace-
+ment vectors at the locations (u, v), the input volume (2) stores the vectors sampled at the locations
+pk along the trajectory
+
+Bi-directional optical flow: It is natural to consider an extension to a bi-directional optical flow, which can be
+obtained by computing an additional set of displacement fields in the opposite direction. We then
+construct an input volume Iτ by stacking L/2 forward flows between frames τ and τ +L/2 and L/2
+backward flows between frames τ − L/2 and τ . The input Iτ thus has the same number of channels
+(2L) as before.
+
+Mean flow subtraction: It is generally beneficial to perform zero-centering of the network input,
+as it allows the model to better exploit the rectification non-linearities.
+ In our case, we consider a simpler
+approach: from each displacement field d we subtract its mean vector.
+
+Considering that a ConvNet requires a fixed-size
+input, we sample a 224 × 224 × 2L sub-volume from Iτ and pass it to the net as input.
+
+Indeed, the HOF and MBH
+local descriptors are based on the histograms of orientations of optical flow or its gradient, which
+can be obtained from the displacement field input (1) using a single convolutional layer (containing orientation-sensitive filters), followed by the rectification and pooling layers.
+
+A more principled way of combining several datasets is based on multi-task learning [5]. Its aim
+is to learn a (video) representation, which is applicable not only to the task in question (such as
+HMDB-51 classification), but also to other tasks (e.g. UCF-101 classification). Additional tasks act
+as a regulariser, and allow for the exploitation of additional training data. In our case, a ConvNet
+architecture is modified so that it has two softmax classification layers on top of the last fully-
+connected layer: one softmax layer computes HMDB-51 classification scores, the other one – the
+UCF-101 scores. Each of the layers is equipped with its own loss function, which operates only on
+the videos, coming from the respective dataset. The overall training loss is computed as the sum of
+the individual tasks’ losses, and the network weight derivatives can be found by back-propagation.
+
+Training: The training procedure can be seen as an adaptation of that of [15] to video frames, and
+is generally the same for both spatial and temporal nets. The network weights are learnt using the
+mini-batch stochastic gradient descent with momentum (set to 0.9). At each iteration, a mini-batch
+of 256 samples is constructed by sampling 256 training videos (uniformly across the classes), from
+each of which a single frame is randomly selected. In spatial net training, a 224 × 224 sub-image is
+randomly cropped from the selected frame; it then undergoes random horizontal flipping and RGB
+jittering. The videos are rescaled beforehand, so that the smallest side of the frame equals 256. We
+note that unlike [15], the sub-image is sampled from the whole frame, not just its 256 × 256 center.
+In the temporal net training, we compute an optical flow volume I for the selected training frame as
+described in Sect. 3. From that volume, a fixed-size 224 × 224 × 2L input is randomly cropped and
+flipped. The learning rate is initially set to 10−2 , and then decreased according to a fixed schedule,
+which is kept the same for all training sets. Namely, when training a ConvNet from scratch, the rate
+is changed to 10−3 after 50K iterations, then to 10−4 after 70K iterations, and training is stopped after 80K iterations. In the fine-tuning scenario, the rate is changed to 10−3 after 14K iterations, and
+training stopped after 20K iterations.
+
+Testing: At test time, given a video, we sample a fixed number of frames (25 in our experiments)
+with equal temporal spacing between them. From each of the frames we then obtain 10 ConvNet
+inputs [15] by cropping and flipping four corners and the center of the frame. The class scores for the
+whole video are then obtained by averaging the scores across the sampled frames and crops therein.
+
+Two-stream ConvNets: Here we evaluate the complete two-stream model, which combines the
+two recognition streams. One way of combining the networks would be to train a joint stack of
+fully-connected layers on top of full6 or full7 layers of the two nets. This, however, was not feasible
+in our case due to over-fitting. We therefore fused the softmax scores using either averaging or
+a linear SVM. From Table 3 we conclude that: (i) temporal and spatial recognition streams are
+complementary, as their fusion significantly improves on both (6% over temporal and 14% over
+spatial nets); (ii) SVM-based fusion of softmax scores outperforms fusion by averaging; (iii) using
+bi-directional flow is not beneficial in the case of ConvNet fusion; (iv) temporal ConvNet, trained
+using multi-task learning, performs the best both alone and when fused with a spatial net.
+
+
+=========================================================================
+
+
+Temporal Segment Networks: Towards Good Practices for Deep Action Recognition
+
+Limin Wang1 , Yuanjun Xiong2 , Zhe Wang3 , Yu Qiao3, Dahua Lin2 ,
+Xiaoou Tang2 , and Luc Van Gool1
+
+
+ 1) how to design an ef-
+fective and efficient video-level framework for learning video representation that
+is able to capture long-range temporal structure; 2) how to learn the ConvNet
+models given limited training samples. 
+
+we build our method on top
+of the successful two-stream architecture
+
+In terms of temporal structure modeling, a key observation is that
+consecutive frames are highly redundant. Therefore, dense temporal sampling,
+which usually results in highly similar sampled frames, is unnecessary. Instead a
+sparse temporal sampling strategy will be more favorable in this case.
+
+we develop a video-level framework, called temporal segment
+network (TSN). This framework extracts short snippets over a long video se-
+quence with a sparse sampling scheme, where the samples distribute uniformly
+along the temporal dimension. Thereon, a segmental structure is employed to ag-
+gregate information from the sampled snippets. In this sense, temporal segment
+networks are capable of modeling long-range temporal structure over the whole
+video. Moreover, this sparse sampling strategy preserves relevant information
+with dramatically lower cost, thus enabling end-to-end learning over long video
+sequences under a reasonable budget in both time and computing resources.
+
+Our method differs from these end-to-end deep ConvNets by its
+novel adoption of a sparse temporal sampling strategy, which enables efficient
+learning using the entire videos without the limitation of sequence length.
+
+Instead of working on single frames or frame stacks, temporal segment networks
+operate on a sequence of short snippets sparsely sampled from the entire video.
+Each snippet in this sequence will produce its own preliminary prediction of
+the action classes. Then a consensus among the snippets will be derived as
+the video-level prediction. In the learning process, the loss values of video-level
+predictions, other than those of snippet-level predictions which were used in two-
+stream ConvNets, are optimized by iteratively updating the model parameters.
+
+Formally, given a video V , we divide it into K segments {S1 , S2 , · · · , SK }
+of equal durations. Then, the temporal segment network models a sequence of
+snippets as follows:
+TSN(T1 , T2 , · · · , TK ) = H(G(F(T1 ; W), F(T2 ; W), · · · , F(TK ; W))).
+ 
+ Here (T1 , T2 , · · · , TK ) is a sequence of snippets. Each snippet Tk is randomly
+sampled from its corresponding segment Sk . F(Tk ; W) is the function repre-
+senting a ConvNet with parameters W which operates on the short snippet Tk
+and produces class scores for all the classes. The segmental consensus function
+G combines the outputs from multiple short snippets to obtain a consensus of
+class hypothesis among them. Based on this consensus, the prediction function H
+predicts the probability of each action class for the whole video. Here we choose
+the widely used Softmax function for H
+
+Network Inputs: We are also interested in exploring more input modalities
+to enhance the discriminative power of temporal segment networks. Originally,
+the two-stream ConvNets used RGB images for the spatial stream and stacked
+optical flow fields for the temporal stream. Here, we propose to study two extra
+modalities, namely RGB difference and warped optical flow fields.
+
+we extract the warped optical flow
+by first estimating homography matrix and then compensating camera motion.
+
+We come up with a cross modality pre-training technique
+in which we utilize RGB models to initialize the temporal networks. First, we
+discretize optical flow fields into the interval from 0 to 255 by a linear trans-
+formation. This step makes the range of optical flow fields to be the same with
+RGB images. Then, we modify the weights of first convolution layer of RGB
+models to handle the input of optical flow fields. Specifically, we average the
+weights across the RGB channels and replicate this average by the channel num-
+ber of temporal network input. This initialization method works pretty well for
+temporal networks and reduce the effect of over-fitting in experiments.
+
+In the learning process, batch
+normalization will estimate the activation mean and variance within each batch
+and use them to transform these activation values into a standard Gaussian dis-
+tribution. This operation speeds up the convergence of training but also leads
+to over-fitting in the transferring process
+
+We exploit two new data augmentation techniques: corner cropping and scale-
+jittering. 
+
+ by fixing K for all videos, we assemble a sparse temporal sampling
+strategy, where the sampled snippets contain only a small portion of the frames.
+It drastically reduces the computational cost for evaluating ConvNets on the
+frames, compared with previous works using densely sampled frames.
+Temporal segment network: One input video is divided into K segments and
+a short snippet is randomly selected from each segment. The class scores of different
+snippets are fused by an the segmental consensus function to yield segmental consensus,
+which is a video-level prediction. Predictions from all modalities are then fused to
+produce the final prediction. ConvNets on all snippets share parameters.
+
+Testing Temporal Segment Networks:
+we sample 25
+RGB frames or optical flow stacks from the action videos. Meanwhile, we crop
+4 corners and 1 center, and their horizontal flipping from the sampled frames to
+evaluate the ConvNets. For the fusion of spatial and temporal stream networks,
+we take a weighted average of them.
+
+We use the mini-batch stochastic gradient descent algorithm to learn the net-
+work parameters, where the batch size is set to 256 and momentum set to 0.9.
+We initialize network weights with pre-trained models from ImageNet [33]. We
+set a smaller learning rate in our experiments. For spatial networks, the learn-
+1
+ing rate is initialized as 0.001 and decreases to its every 2, 000 iterations.
+10
+The whole training procedure stops at 4, 500 iterations. For temporal networks,
+we initialize the learning rate as 0.005, which reduces to its 1
+ after 12, 000 and
+10
+18, 000 iterations. The maximum iteration is set as 20, 000. Concerning data aug-
+mentation, we use the techniques of location jittering, horizontal flipping, corner
+cropping, and scale jittering, as specified in Section 3.2. For the extraction of
+optical flow and warped optical flow, we choose the TVL1 optical flow algorithm
+[35] implemented in OpenCV with CUDA. To speed up training, we employ a
+data-parallel strategy with multiple GPUs, implemented with our modified ver-
+sion of Caffe [36] and OpenMPI 2 . The whole training time on UCF101 is around
+2 hours for spatial TSNs and 9 hours for temporal TSNs with 4 TITANX GPUs.
+
+
+
+
+========================================================================
+
+
+
+
+Spatiotemporal Residual Networks for Video Action Recognition
+
+Christoph Feichtenhofer
+ Axel Pinz
+ Richard P. Wildes
+
+ 
+Our novel architecture generalizes ResNets for the spatiotemporal domain by
+introducing residual connections in two ways. First, we inject residual connections
+between the appearance and motion pathways of a two-stream architecture to
+allow spatiotemporal interaction between the two streams. Second, we transform
+pretrained image ConvNets into spatiotemporal networks by equipping them with
+learnable convolutional filters that are initialized as temporal residual connections
+and operate on adjacent feature maps in time. This approach slowly increases the
+spatiotemporal receptive field as the depth of the model increases and naturally
+integrates image ConvNet design principles.
+
+We build on the two-stream approach [20] that employs two separate ConvNet streams, a spatial
+appearance stream, which achieves state-of-the-art action recognition from RGB images and a
+temporal motion stream, which operates on optical flow information.
+
+ converting the 1×1 convolutional dimensionality mapping filters in ResNets to temporal filters.
+By stacking several of these transformed temporal filters throughout the network we provide a large
+receptive field for the discriminative units at the end of the network.
+We convert convolutional dimensionality
+mapping filters to temporal filters that provide the network with learnable residual connections over
+time. By stacking several of these temporal filters and sampling the input sequence at large temporal
+strides (i.e. skipping frames), we enable the network to operate over large temporal extents of the
+input. 
+
+In
+our work we directly convert image ConvNets into 3D architectures and show greatly improved
+performance over the two-stream baseline
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
