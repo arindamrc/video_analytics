@@ -14,6 +14,7 @@ import os
 import random
 import shutil
 import time
+import torch
 
 # Some parameters
 VIDEO_FRAME_SAMPLE_RATE = 10
@@ -28,7 +29,7 @@ NORM_MEANS_TF = [0.485, 0.456, 0.406]
 NORM_STDS_TF = [0.229, 0.224, 0.225]
 NACTION_CLASSES = 101
 NEPOCHS = 3
-INITIAL_LR = 0.01
+INITIAL_LR = 0.001
 MOMENTUM_VAL = 0.9
 MILESTONES_LR = [1,2]
 
@@ -41,7 +42,9 @@ FRAMES_DIR_TEST = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101-frames-test"
 VIDEOLIST_TRAIN = "/home/arc/VA_Assignments/Sheet03/demoTrain.txt"
 VIDEOLIST_TEST = "/home/arc/VA_Assignments/Sheet03/demoTest.txt"
 ACTIONLABEL_FILE = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101/ucfTrainTestlist/classInd.txt"
-CHECKPOINT_DIR = "./checkpoints"
+CHECKPOINT_DIR = "./checkpoints/"
+SPATIAL_CKP_FILE = "spatial_ckp.pth.tar"
+SPATIAL_BEST_FILE = "spatial_best.pth.tar"
 
 # Some utilities
 
@@ -64,7 +67,7 @@ def makeCheckpoint(modelState, isBest, ckpLoc, bestModel):
 	"""
 	Save model state to resume from later.
 	"""
-	torch.save(modelState, ckpLoc)
+	tch.save(modelState, ckpLoc)
 	if isBest:
 		shutil.copyfile(ckpLoc, bestModel)
 
@@ -74,9 +77,9 @@ def getOneHot(label, nClasses):
 	Get one-hot encoding for the supplied label.
 	"""
 	assert label < nClasses
-	oh = np.zeros((1,nClasses))
-	oh[0, label - 1] = 1
-	return oh
+	oh = np.zeros((1, nClasses), dtype = np.float32)
+	oh[0, label - 1] = 1.0
+	return tch.from_numpy(oh)
 
 
 # Zuerst, we need to extract the individual frames from the videos and save them to disk. 
@@ -113,11 +116,13 @@ def videoInfo(line, mode):
 	actionLabel = None
 	if mode == "train":
 		videoLoc, actionLabel = line.split(" ") # actionLabel is a number
+		actionLabel = actionLabel.strip()
 	else:
 		# The test video list does not have numeric labels
 		videoLoc = line
 	videoLoc = videoLoc.strip()
 	actionCategory, videoName = videoLoc.split("/") # actionCategory is a string
+	actionCategory = actionCategory.strip()
 	videoName = videoName[:videoName.rfind(".")] # get name without the video extension
 	_, _, ngroup, nclip = videoName.split("_")
 	return videoLoc, videoName, actionLabel, actionCategory, ngroup, nclip
@@ -159,13 +164,13 @@ class SpatialDataset(Dataset):
 	from each video upon each invocation.
 	"""
 
-	def __init__(self, videoListLoc, rootDir, imageTransforms = None, sampleSize = VIDEO_INPUT_FRAME_COUNT, mode = "train", actionLabelLoc = None):
+	def __init__(self, videoListLoc, rootDir, imageTransforms = None, frameSampleSize = VIDEO_INPUT_FRAME_COUNT, mode = "train", actionLabelLoc = None):
 		"""
 		The parameters mean:
 		videoListLoc : The file with the video list.
 		rootDir : The directory which has all saved frames per actionCategory per video.
 		transforms : A list of torch image transforms to apply to each frame.
-		sampleSize : No. of frames to sample from each video (unifrom random).
+		frameSampleSize : No. of frames to sample from each video (unifrom random).
 		"""
 		super(SpatialDataset, self).__init__()
 		if not rootDir.endswith("/"):
@@ -173,19 +178,21 @@ class SpatialDataset(Dataset):
 		else:
 			self.rootDir = rootDir
 		self.imageTransforms = imageTransforms
-		self.sampleSize = sampleSize
+		self.frameSampleSize = frameSampleSize
 		self.mode = mode
 		with open(videoListLoc, "r") as videoListFile:
 			self.videoList = [line for line in videoListFile]
-		if mode == "test":
-			if actionLabelLoc is None:
-				raise ValueError("Action label dictionary required in test mode!")
-			with open(actionLabelLoc, "r") as actionLabelFile:
-				# self.actionLabelDict = {line.split(" ")[1] : line.split(" ")[0] for line in actionLabelFile}
-				self.actionLabelDict = {}
-				for line in actionLabelFile:
-					val, key = line.split(" ")
-					self.actionLabelDict[key] = val
+		# if mode == "test":
+		if actionLabelLoc is None:
+			raise ValueError("Action label dictionary required!")
+		with open(actionLabelLoc, "r") as actionLabelFile:
+			# self.actionLabelDict = {line.split(" ")[1] : line.split(" ")[0] for line in actionLabelFile}
+			self.actionLabelDict = {}
+			for line in actionLabelFile:
+				val, key = line.split(" ")
+				key = key.strip()
+				val = int(val)
+				self.actionLabelDict[key] = val
 		return
 
 	
@@ -207,14 +214,19 @@ class SpatialDataset(Dataset):
 		frameDir = self.rootDir + actionCategory + "/" + videoName + "/"
 		# get the number of frames in the folder
 		nFrames = len([frameName for frameName in os.listdir(frameDir)])
-		print nFrames, self.sampleSize, random.sample(range(1, nFrames), self.sampleSize)
-		frameNames = random.sample(range(1, nFrames), self.sampleSize).sort() # get random frame names
-		print frameNames
+		# frameNames = sorted(random.sample(range(1, nFrames), self.frameSampleSize)) # get random frame names
+		# if self.imageTransforms is not None:
+		# 	loadedFrames = [self.imageTransforms(Image.open(frameDir + str(frame) + FRAME_EXTN)) for frame in frameNames]
+		# else:
+		# 	loadedFrames = [transforms.ToTensor(Image.open(frameDir + str(frame) + FRAME_EXTN)) for frame in frameNames]
+		# loadedFrames = tch.stack(loadedFrames) # convert the list into a tensor
+		frameName = random.randint(0, nFrames - 1) # load a random frame
 		if self.imageTransforms is not None:
-			loadedFrames = [self.imageTransforms(Image.open(frameDir + frame + FRAME_EXTN)) for frame in frameNames]
+			loadedFrame = self.imageTransforms(Image.open(frameDir + str(frameName) + FRAME_EXTN))
 		else:
-			loadedFrames = [Image.open(frameDir + frame + FRAME_EXTN) for frame in frameNames]
-		return loadedFrames, actionLabel # the chosen frames from the video and the action label
+			loadedFrame = transforms.ToTensor(Image.open(frameDir + str(frameName) + FRAME_EXTN))
+		actionLabel = int(actionLabel)
+		return loadedFrame, actionLabel # the chosen frames from the video and the action label
 
 
 
@@ -252,7 +264,7 @@ class SpatialNetwork(object):
 	A wrapper for the spatial stream.
 	"""
 
-	def __init__(self, nActionClasses, nEpochs, lr, momentumVal, trainLoader, testLoader, lrMilestones, ckpLoc, resumeLoc = None):
+	def __init__(self, nActionClasses, nEpochs, lr, momentumVal, trainLoader, testLoader, lrMilestones, ckpLoc, gpu = False):
 		"""
 		Initialize the model
 		"""
@@ -262,22 +274,31 @@ class SpatialNetwork(object):
 		self.lr = lr
 		self.trainLoader = trainLoader
 		self.testLoader = testLoader
+		self.lrMilestones = lrMilestones
+		self.gpu = gpu
+		if self.gpu:
+			print "GPU available!"
+		else:
+			print "No GPU available!"
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
-		self.model = models.vgg16(pretrained = True).cuda() 
-		self.criterion = nn.CrossEntropyLoss().cuda() # set the loss function
+		self.model = models.vgg16(pretrained = True)
+		self.model.features.require_grad = False # fix the feature weights
+		# swap out the final layer; the magic numbers are VGG parameters
+		self.model.classifier[6] = nn.Linear(in_features=4096, out_features = nActionClasses, bias = True)
+		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
 		# a simple SGD optimizer
 		self.optimizer = tch.optim.SGD(self.model.parameters(), self.lr, momentum = momentumVal) 
-		self.resumeLoc = resumeLoc
 		self.startEpoch = 0 # initialize to the first epoch
 		# a multi-step scheduler that changes the learning rate as per a fixed schedule
 		self.scheduler = slr.MultiStepLR(self.optimizer, lrMilestones, gamma = 0.1, last_epoch = -1)
 		self.highestPrecision = 0.0
 		self.isBest = False
+		if not ckpLoc.endswith("/"):
+			ckpLoc += "/"
 		checkAndMakeDirectories(ckpLoc) # create the checkpoint folder if it doesn't exist already
 		self.ckpLoc = ckpLoc
-		if tch.cuda.is_available():
-			print "GPU available!"
-			self.model = nn.DataParallel(self.model)
+		self.resumeLoc = self.ckpLoc + SPATIAL_CKP_FILE
+		self.model = self.model.cuda() if self.gpu else self.model
 
 
 	def train(self):
@@ -286,23 +307,24 @@ class SpatialNetwork(object):
 		"""
 		self.model.train() # switch to train mode
 		startTime = time.time()
-		for nBatch, (data, label) in enumerate(self.trainLoader):
-			label = getOneHot(self.nActionClasses, label)
-			label = tch.from_numpy(label)
-			op = None
-			for dp in data:
-				ip = ag.Variable(dp)
-				if op is None:
-					op = self.model(ip)
-				else:
-					op += self.model(ip)
-			loss = self.criterion(op, label)
+		for iBatch, (data, label) in enumerate(self.trainLoader):
+			if self.gpu:
+				labelVar = ag.Variable(label.cuda(async = True))
+				ip = ag.Variable(data.cuda(async = True))
+			else:
+				labelVar = ag.Variable(label)
+				ip = ag.Variable(data)
+			op = self.model(ip)
+			loss = self.criterion(op, labelVar)
 			self.optimizer.zero_grad()
 			loss.backward()
 			self.optimizer.step()
+
+		torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
 		endTime = time.time()
 		duration = endTime - startTime
 		print "Epoch %d completed in %lf seconds" % (self.epoch, duration)
+		self.save()
 
 
 	def validate(self):
@@ -311,23 +333,26 @@ class SpatialNetwork(object):
 		"""
 		self.model.eval() # switch to evaluation mode
 		correct = 0
-		total = 0
+		total = len(self.testLoader.dataset)
 		loss = 0
-		for nBatch, (data, label) in enumerate(self.testLoader):
-			ohLabel = getOneHot(self.nActionClasses, label)
-			ohLabel = tch.from_numpy(ohLabel)
-			op = None
-			for dp in data:
-				ip = ag.Variable(dp)
-				if op is None:
-					op = self.model(ip)
+		with tch.no_grad():
+			for iBatch, (data, label) in enumerate(self.testLoader):
+				if self.gpu:
+					labelVar = ag.Variable(label.cuda(async = True))
+					ip = ag.Variable(data.cuda(async = True))
 				else:
-					op += self.model(ip)
-			loss += self.criterion(op, ohLabel) # total loss
-			prediction = np.argmax(op.cpu().numpy()) # the o/p is one-hot
-			if prediction == label:
-				correct += 1
-			total += 1
+					labelVar = ag.Variable(label)
+					ip = ag.Variable(data)
+				op = self.model(ip)
+				# print self.model.classifier[0].weight
+				# print op.shape
+				loss += self.criterion(op, labelVar) # total loss
+				pred = op.max(1, keepdim=True)[1] # get the index of the max log-probability
+				# print op.shape
+				# print labelVar.shape
+				correct += pred.eq(labelVar.view_as(pred)).sum().item()
+		print self.epoch, total, correct, loss.item()
+		print "Validation for epoch %d: total = %d, correct = %d, loss = %lf" % (self.epoch, total, correct, loss.item())
 		return (correct / total), loss
 
 
@@ -337,15 +362,16 @@ class SpatialNetwork(object):
 		"""
 		if not (self.resumeLoc and os.path.isfile(self.resumeLoc)):
 			print "No checkpoints found; starting from scratch!"
-			return
-		print "Resuming training from checkpoint file: %s" % (resumeLoc)
+			return False
+		print "Resuming training from checkpoint file: %s" % (self.resumeLoc)
 		checkpoint = tch.load(self.resumeLoc)
-		self.startEpoch = checkpoint["epoch"]
+		self.startEpoch = checkpoint["epoch"] + 1
 		self.highestPrecision = checkpoint["highestPrecision"]
 		self.model.load_state_dict(checkpoint["model"])
 		self.optimizer.load_state_dict(checkpoint["optimizer"])
-		self.scheduler = slr.MultiStepLR(self.optimizer, lrMilestones, gamma = 0.1, last_epoch = self.startEpoch)
-		print "Loaded checkpoint!"
+		self.scheduler = slr.MultiStepLR(self.optimizer, self.lrMilestones, gamma = 0.1, last_epoch = self.startEpoch)
+		print "Loaded checkpoint: starting from epoch: %d" % (self.startEpoch)
+		return True
 
 
 	def save(self):
@@ -357,7 +383,7 @@ class SpatialNetwork(object):
 			"model" : self.model.state_dict(),
 			"highestPrecision" : self.highestPrecision,
 			"optimizer" : self.optimizer.state_dict()
-			}, self.isBest, self.ckpLoc + "spatial_ckp.pth.tar", self.ckpLoc + "spatial_best.pth.tar")
+			}, self.isBest, self.ckpLoc + SPATIAL_CKP_FILE, self.ckpLoc + SPATIAL_BEST_FILE)
 		return
 
 
@@ -366,8 +392,9 @@ class SpatialNetwork(object):
 		Execute all epochs. Each epoch consists of training 
 		on all data followed by a validation step.
 		"""
-		self.resume()
+		found = self.resume()
 		for self.epoch in range(self.startEpoch, self.nEpochs):
+			# if not found:
 			self.train()
 			precision, loss = self.validate()
 			if precision > self.highestPrecision:
@@ -384,12 +411,13 @@ def main():
 		convertVideosToFrames(DATA_DIR, FRAMES_DIR_TRAIN, VIDEOLIST_TRAIN)
 		convertVideosToFrames(DATA_DIR, FRAMES_DIR_TEST, VIDEOLIST_TEST, mode = "test")
 	imageTransforms = getTransforms()
-	trainDataset = SpatialDataset(VIDEOLIST_TRAIN, FRAMES_DIR_TRAIN, imageTransforms)
-	trainDataLoader = getDataLoader(trainDataset)
+	trainDataset = SpatialDataset(VIDEOLIST_TRAIN, FRAMES_DIR_TRAIN, imageTransforms, frameSampleSize = 2, actionLabelLoc = ACTIONLABEL_FILE)
+	trainDataLoader = getDataLoader(trainDataset, batchSize = 5)
 	# the same image transforms for the test data as well
 	testDataset = SpatialDataset(VIDEOLIST_TEST, FRAMES_DIR_TEST, imageTransforms, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
-	testDataLoader = getDataLoader(testDataset)
-	net = SpatialNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR)
+	testDataLoader = getDataLoader(testDataset, batchSize = 2)
+	gpu = tch.cuda.is_available()
+	net = SpatialNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
 	net.execute()
 
 
