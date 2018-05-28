@@ -15,11 +15,12 @@ import random
 import shutil
 import time
 import torch
+import itertools
+from util import *
 
 # Some parameters
 VIDEO_FRAME_SAMPLE_RATE = 10
-CONVERT = True
-VIDEO_INPUT_FRAME_COUNT = 3
+VIDEO_INPUT_FLOW_COUNT = 10
 TRAIN_BATCH_SIZE = 2 
 NWORKERS_LOADER = 4 
 SHUFFLE_LOADER = True
@@ -45,148 +46,39 @@ ACTIONLABEL_FILE = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101/ucfTrainTestli
 CHECKPOINT_DIR = "./checkpoints/"
 SPATIAL_CKP_FILE = "spatial_ckp.pth.tar"
 SPATIAL_BEST_FILE = "spatial_best.pth.tar"
+X_PREFIX_FLOW = "flow_x_"
+Y_PREFIX_FLOW = "flow_y_"
 
-# Some utilities
 
-def checkAndMakeDirectories(*args):
+class MotionDataset(Dataset):
 	"""
-	Check if directory already exists. If not, create it.
-	Returns a list of booleans. Item is true if the i th directory
-	was already there.
-	"""
-	exists = [True] * len(args)
-	for i in range(len(args)):
-		arg = args[i]
-		if not os.path.exists(arg):
-			exists[i] = False
-			os.makedirs(arg)
-	return exists
-
-
-def makeCheckpoint(modelState, isBest, ckpLoc, bestModel):
-	"""
-	Save model state to resume from later.
-	"""
-	tch.save(modelState, ckpLoc)
-	if isBest:
-		shutil.copyfile(ckpLoc, bestModel)
-
-
-def getOneHot(label, nClasses):
-	"""
-	Get one-hot encoding for the supplied label.
-	"""
-	assert label < nClasses
-	oh = np.zeros((1, nClasses), dtype = np.float32)
-	oh[0, label - 1] = 1.0
-	return tch.from_numpy(oh)
-
-
-# Zuerst, we need to extract the individual frames from the videos and save them to disk. 
-# We will not extract all frames from a video, but every 'N' frame.
-
-def extractEveryNthFrame(videoLoc, N):
-	"""
-	Get every N th frame from the video @ videoLoc.
-	"""
-	if not (os.path.exists(videoLoc) and os.path.isfile(videoLoc)):
-		raise ValueError("Video does not exist: %s" % (videoLoc))
-	cap = cv2.VideoCapture(videoLoc)
-	frameList = [] #an empty list to hold the frames
-	frameIdx = 0
-	while(cap.isOpened()):
-		ret, frame = cap.read()
-		if not ret:
-			print "capture done"
-			break
-		if frameIdx % N == 0:
-			frameList.append(frame)
-		frameIdx = frameIdx + 1
-	cap.release()
-	return frameList
-
-
-
-def videoInfo(line, mode):
-	"""
-	Extract video information from video list file's line.
-	Returns information in this order:
-	video location, video name, action label (number), action category (string), group number, clip number
-	"""
-	actionLabel = None
-	if mode == "train":
-		videoLoc, actionLabel = line.split(" ") # actionLabel is a number
-		actionLabel = actionLabel.strip()
-	else:
-		# The test video list does not have numeric labels
-		videoLoc = line
-	videoLoc = videoLoc.strip()
-	actionCategory, videoName = videoLoc.split("/") # actionCategory is a string
-	actionCategory = actionCategory.strip()
-	videoName = videoName[:videoName.rfind(".")] # get name without the video extension
-	_, _, ngroup, nclip = videoName.split("_")
-	return videoLoc, videoName, actionLabel, actionCategory, ngroup, nclip
-
-
-
-def convertVideosToFrames(rootDir, saveDir, videoListLoc, sampleRate = VIDEO_FRAME_SAMPLE_RATE, mode = "train"):
-	"""
-	Read video list and convert each to a collection of sampled frames. 
-	The sampling rate is given by sampleRate (default 10).
-	The format of the video list file is: 
-	action-category/v_action-category_group-number_clip-number.avi action-category-index
-	The frames are saved under the 'saveDir'. Each action category has its own subfolder.
-	The saved frames are named as frame-index_action-label.jpg.
-	"""
-	if not rootDir.endswith("/"):
-		rootDir = rootDir + "/"
-	if not saveDir.endswith("/"):
-		saveDir = saveDir + "/"
-	with open(videoListLoc, "r") as videoListFile:
-		for line in videoListFile: # for each video
-			videoLoc, videoName, _, actionCategory, _, _ = videoInfo(line, mode)
-			videoLoc = rootDir + videoLoc
-			frameDir = saveDir + actionCategory + "/" + videoName # all frames of a video go in one folder
-			if all(checkAndMakeDirectories(frameDir)):
-				# frames written already; continue
-				continue
-			frameList = extractEveryNthFrame(videoLoc, sampleRate) 
-			for i in range(len(frameList)):
-				# name of the frame
-				frameLoc = frameDir + "/" + str(i) + ".jpg"
-				cv2.imwrite(frameLoc, frameList[i]) # save to disk
-	return
-
-
-class SpatialDataset(Dataset):
-	"""
-	Inherits from the torch Dataset. Provides N random frames 
-	from each video upon each invocation.
+	Inherits from the torch Dataset. Provides 2*L flow-frames 
+	starting from a random frame from each video upon each invocation.
+	Here flowSampleSize = L.
 	"""
 
-	def __init__(self, videoListLoc, rootDir, imageTransforms = None, frameSampleSize = VIDEO_INPUT_FRAME_COUNT, mode = "train", actionLabelLoc = None):
+	def __init__(self, videoListLoc, rootDir, imageTransforms = None, flowSampleSize = VIDEO_INPUT_FLOW_COUNT, mode = "train", actionLabelLoc = None):
 		"""
 		The parameters mean:
 		videoListLoc : The file with the video list.
-		rootDir : The directory which has all saved frames per actionCategory per video.
-		transforms : A list of torch image transforms to apply to each frame.
-		frameSampleSize : No. of frames to sample from each video (unifrom random).
+		rootDir : The directory which has all saved flow frames per actionCategory per video.
+		transforms : A list of torch image transforms to apply to each flow frame.
+		flowSampleSize : 0.5 * No. of flow frames to get from each video (unifromly).
+		(The starting frame is randomly selected)
 		"""
-		super(SpatialDataset, self).__init__()
+		super(MotionDataset, self).__init__()
 		if not rootDir.endswith("/"):
 			self.rootDir = rootDir + "/"
 		else:
 			self.rootDir = rootDir
 		self.imageTransforms = imageTransforms
-		self.frameSampleSize = frameSampleSize
+		self.flowSampleSize = flowSampleSize
 		self.mode = mode
 		with open(videoListLoc, "r") as videoListFile:
 			self.videoList = [line for line in videoListFile]
-		# if mode == "test":
 		if actionLabelLoc is None:
 			raise ValueError("Action label dictionary required!")
 		with open(actionLabelLoc, "r") as actionLabelFile:
-			# self.actionLabelDict = {line.split(" ")[1] : line.split(" ")[0] for line in actionLabelFile}
 			self.actionLabelDict = {}
 			for line in actionLabelFile:
 				val, key = line.split(" ")
@@ -211,70 +103,42 @@ class SpatialDataset(Dataset):
 		if self.mode == "test":
 			# the test video list does not have numeric labels
 			actionLabel = self.actionLabelDict[actionCategory]
-		frameDir = self.rootDir + actionCategory + "/" + videoName + "/"
+		flowDir = self.rootDir + actionCategory + "/" + videoName + "/"
 		# get the number of frames in the folder
-		nFrames = len([frameName for frameName in os.listdir(frameDir)])
-		# frameNames = sorted(random.sample(range(1, nFrames), self.frameSampleSize)) # get random frame names
-		# if self.imageTransforms is not None:
-		# 	loadedFrames = [self.imageTransforms(Image.open(frameDir + str(frame) + FRAME_EXTN)) for frame in frameNames]
-		# else:
-		# 	loadedFrames = [transforms.ToTensor(Image.open(frameDir + str(frame) + FRAME_EXTN)) for frame in frameNames]
-		# loadedFrames = tch.stack(loadedFrames) # convert the list into a tensor
-		frameName = random.randint(0, nFrames - 1) # load a random frame
+		nFlows = len([fName for fName in os.listdir(flowDir)]) / 2 # there x and y flows
+		iFlowFrame = random.randint(0, nFlows - self.flowSampleSize - 1) # load a random flow frame
+		xFlowFrames = [self.rootDir + videoName + "/" + X_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
+		xFlowFrames = [self.rootDir + videoName + "/" + Y_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
+		# combine the two lists alternatingly
+		flowFrames = list(it.next() for it in itertools.cycle([iter(xFlowFrames), iter(yFlowFrames)]))
+		# load the flow frames
 		if self.imageTransforms is not None:
-			loadedFrame = self.imageTransforms(Image.open(frameDir + str(frameName) + FRAME_EXTN))
+			loadedFrames = [self.imageTransforms(Image.open(frame)) for frame in flowFrames]
 		else:
-			loadedFrame = transforms.ToTensor(Image.open(frameDir + str(frameName) + FRAME_EXTN))
+			loadedFrames = [transforms.ToTensor(Image.open(frame)) for frame in flowFrames]
+		loadedFrames = tch.stack(loadedFrames) # convert the list of flow frames into a tensor
 		actionLabel = int(actionLabel)
-		return loadedFrame, actionLabel # the chosen frames from the video and the action label
+		return loadedFrame, actionLabel # the chosen flow frames from the video and the action label
 
 
 
-def getTransforms(cropSize = CROP_SIZE_TF, hortizontalFlip = HORIZONTAL_FLIP_TF, normMeans = NORM_MEANS_TF, normStds = NORM_STDS_TF):
+class MotionNetwork(object):
 	"""
-	Get image transformations based of provided parameters.
-	"""
-	imgTrans = []
-	if cropSize:
-		imgTrans.append(transforms.RandomCrop(224))
-	if hortizontalFlip:
-		imgTrans.append(transforms.RandomHorizontalFlip())
-	imgTrans.append(transforms.ToTensor())
-	if normMeans and normStds:
-		imgTrans.append(transforms.Normalize(mean = normMeans, std = normStds))
-	return transforms.Compose(imgTrans)
-
-
-
-def getDataLoader(dataset, batchSize = TRAIN_BATCH_SIZE, nWorkers = NWORKERS_LOADER, shuffle = SHUFFLE_LOADER):
-	"""
-	Return a torch dataloader with the given parameters.
-	"""
-	return DataLoader(
-		dataset = dataset, 
-		batch_size = batchSize,
-		shuffle = shuffle,
-		num_workers = nWorkers)
-
-
-
-
-class SpatialNetwork(object):
-	"""
-	A wrapper for the spatial stream.
+	A wrapper for the motion stream.
 	"""
 
-	def __init__(self, nActionClasses, nEpochs, lr, momentumVal, trainLoader, testLoader, lrMilestones, ckpLoc, gpu = False):
+	def __init__(self, nActionClasses, flowSampleSize, nEpochs, lr, momentumVal, trainLoader, testLoader, lrMilestones, ckpLoc, gpu = False):
 		"""
 		Initialize the model
 		"""
-		super(SpatialNetwork, self).__init__()
+		super(MotionNetwork, self).__init__()
 		self.nActionClasses = nActionClasses
 		self.nEpochs = nEpochs
 		self.lr = lr
 		self.trainLoader = trainLoader
 		self.testLoader = testLoader
 		self.lrMilestones = lrMilestones
+		self.flowSampleSize = flowSampleSize
 		self.gpu = gpu
 		if self.gpu:
 			print "GPU available!"
@@ -299,6 +163,16 @@ class SpatialNetwork(object):
 		self.ckpLoc = ckpLoc
 		self.resumeLoc = self.ckpLoc + SPATIAL_CKP_FILE
 		self.model = self.model.cuda() if self.gpu else self.model
+
+
+	def __modifyFirstLayer(self, vggNet):
+		layerOne = vggNet.features[0]
+		avg = 0
+		for inChannel in range(layerOne.in_channels):
+			avg += layerOne.weight[:,inChannel,:,:]
+		avg /= layerOne.in_channels
+		newLayerOne = nn.Conv2d(self.flowSampleSize * 2, layerOne.out_channels, kernel_size = layerOne.kernel_size, padding = layerOne.padding)
+
 
 
 	def train(self):
@@ -407,17 +281,14 @@ class SpatialNetwork(object):
 
 
 def main():
-	if CONVERT:
-		convertVideosToFrames(DATA_DIR, FRAMES_DIR_TRAIN, VIDEOLIST_TRAIN)
-		convertVideosToFrames(DATA_DIR, FRAMES_DIR_TEST, VIDEOLIST_TEST, mode = "test")
 	imageTransforms = getTransforms()
-	trainDataset = SpatialDataset(VIDEOLIST_TRAIN, FRAMES_DIR_TRAIN, imageTransforms, frameSampleSize = 2, actionLabelLoc = ACTIONLABEL_FILE)
+	trainDataset = MotionDataset(VIDEOLIST_TRAIN, FRAMES_DIR_TRAIN, imageTransforms, flowSampleSize = 2, actionLabelLoc = ACTIONLABEL_FILE)
 	trainDataLoader = getDataLoader(trainDataset, batchSize = 5)
 	# the same image transforms for the test data as well
-	testDataset = SpatialDataset(VIDEOLIST_TEST, FRAMES_DIR_TEST, imageTransforms, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
+	testDataset = MotionDataset(VIDEOLIST_TEST, FRAMES_DIR_TEST, imageTransforms, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
 	testDataLoader = getDataLoader(testDataset, batchSize = 2)
 	gpu = tch.cuda.is_available()
-	net = SpatialNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
+	net = MotionNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
 	net.execute()
 
 
