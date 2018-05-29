@@ -16,41 +16,11 @@ import shutil
 import time
 import torch
 import itertools
-from util import *
-
-# Some parameters
-VIDEO_FRAME_SAMPLE_RATE = 10
-VIDEO_INPUT_FLOW_COUNT = 10
-TRAIN_BATCH_SIZE = 2 
-NWORKERS_LOADER = 4 
-SHUFFLE_LOADER = True
-CROP_SIZE_TF = 224 
-HORIZONTAL_FLIP_TF = True 
-NORM_MEANS_TF = [0.485, 0.456, 0.406] 
-NORM_STDS_TF = [0.229, 0.224, 0.225]
-NACTION_CLASSES = 101
-NEPOCHS = 3
-INITIAL_LR = 0.001
-MOMENTUM_VAL = 0.9
-MILESTONES_LR = [1,2]
-
-# Some constants
-VIDEO_EXTN = ".avi"
-FRAME_EXTN = ".jpg"
-DATA_DIR = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101"
-FRAMES_DIR_TRAIN = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101-frames-train"
-FRAMES_DIR_TEST = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101-frames-test"
-VIDEOLIST_TRAIN = "/home/arc/VA_Assignments/Sheet03/demoTrain.txt"
-VIDEOLIST_TEST = "/home/arc/VA_Assignments/Sheet03/demoTest.txt"
-ACTIONLABEL_FILE = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101/ucfTrainTestlist/classInd.txt"
-CHECKPOINT_DIR = "./checkpoints/"
-SPATIAL_CKP_FILE = "spatial_ckp.pth.tar"
-SPATIAL_BEST_FILE = "spatial_best.pth.tar"
-X_PREFIX_FLOW = "flow_x_"
-Y_PREFIX_FLOW = "flow_y_"
+from utils import *
+from parameters import *
 
 
-class MotionDataset(Dataset):
+class TemporalDataset(Dataset):
 	"""
 	Inherits from the torch Dataset. Provides 2*L flow-frames 
 	starting from a random frame from each video upon each invocation.
@@ -66,7 +36,7 @@ class MotionDataset(Dataset):
 		flowSampleSize : 0.5 * No. of flow frames to get from each video (unifromly).
 		(The starting frame is randomly selected)
 		"""
-		super(MotionDataset, self).__init__()
+		super(TemporalDataset, self).__init__()
 		if not rootDir.endswith("/"):
 			self.rootDir = rootDir + "/"
 		else:
@@ -107,8 +77,8 @@ class MotionDataset(Dataset):
 		# get the number of frames in the folder
 		nFlows = len([fName for fName in os.listdir(flowDir)]) / 2 # there x and y flows
 		iFlowFrame = random.randint(0, nFlows - self.flowSampleSize - 1) # load a random flow frame
-		xFlowFrames = [self.rootDir + videoName + "/" + X_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
-		xFlowFrames = [self.rootDir + videoName + "/" + Y_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
+		xFlowFrames = [self.rootDir + actionCategory + "/" + videoName + "/" + X_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
+		yFlowFrames = [self.rootDir + actionCategory + "/" + videoName + "/" + Y_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
 		# combine the two lists alternatingly
 		flowFrames = list(it.next() for it in itertools.cycle([iter(xFlowFrames), iter(yFlowFrames)]))
 		# load the flow frames
@@ -116,13 +86,14 @@ class MotionDataset(Dataset):
 			loadedFrames = [self.imageTransforms(Image.open(frame)) for frame in flowFrames]
 		else:
 			loadedFrames = [transforms.ToTensor(Image.open(frame)) for frame in flowFrames]
-		loadedFrames = tch.stack(loadedFrames) # convert the list of flow frames into a tensor
+		# combine the loaded frames into a flow volume (a 2*L channel image)
+		flowVolume = tch.squeeze(tch.stack(loadedFrames, dim = 0)) 
 		actionLabel = int(actionLabel)
-		return loadedFrame, actionLabel # the chosen flow frames from the video and the action label
+		return flowVolume, actionLabel # the chosen flow frames from the video and the action label
 
 
 
-class MotionNetwork(object):
+class TemporalNetwork(object):
 	"""
 	A wrapper for the motion stream.
 	"""
@@ -131,7 +102,7 @@ class MotionNetwork(object):
 		"""
 		Initialize the model
 		"""
-		super(MotionNetwork, self).__init__()
+		super(TemporalNetwork, self).__init__()
 		self.nActionClasses = nActionClasses
 		self.nEpochs = nEpochs
 		self.lr = lr
@@ -146,9 +117,10 @@ class MotionNetwork(object):
 			print "No GPU available!"
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
 		self.model = models.vgg16(pretrained = True)
-		self.model.features.require_grad = False # fix the feature weights
+		self.__copyFirstLayer__(self.model) # modify first layer for 2*L channel motion volumes
+		self.model.features.requires_grad = False # fix the feature weights
 		# swap out the final layer; the magic numbers are VGG parameters
-		self.model.classifier[6] = nn.Linear(in_features=4096, out_features = nActionClasses, bias = True)
+		#self.model.classifier[6] = nn.Linear(in_features=4096, out_features = nActionClasses, bias = True)
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
 		# a simple SGD optimizer
 		self.optimizer = tch.optim.SGD(self.model.parameters(), self.lr, momentum = momentumVal) 
@@ -161,17 +133,24 @@ class MotionNetwork(object):
 			ckpLoc += "/"
 		checkAndMakeDirectories(ckpLoc) # create the checkpoint folder if it doesn't exist already
 		self.ckpLoc = ckpLoc
-		self.resumeLoc = self.ckpLoc + SPATIAL_CKP_FILE
-		self.model = self.model.cuda() if self.gpu else self.model
+		self.resumeLoc = self.ckpLoc + MOTION_CKP_FILE
+		self.model = nn.DataParallel(self.model) if self.gpu else self.model
 
 
-	def __modifyFirstLayer(self, vggNet):
+	def __copyFirstLayer__(self, vggNet):
+		"""
+		Modifies the first layer of the VGG net to have the average of the original
+		three channel weights to be copied across all channels in the new input layer. 
+		"""
 		layerOne = vggNet.features[0]
 		avg = 0
 		for inChannel in range(layerOne.in_channels):
-			avg += layerOne.weight[:,inChannel,:,:]
+			avg += layerOne.weight[:, inChannel, :, :]
 		avg /= layerOne.in_channels
 		newLayerOne = nn.Conv2d(self.flowSampleSize * 2, layerOne.out_channels, kernel_size = layerOne.kernel_size, padding = layerOne.padding)
+		for inChannel in range(2 * self.flowSampleSize):
+			newLayerOne.weight.data[:, inChannel, :, :] = avg.data
+		vggNet.features[0] = newLayerOne
 
 
 
@@ -182,6 +161,7 @@ class MotionNetwork(object):
 		self.model.train() # switch to train mode
 		startTime = time.time()
 		for iBatch, (data, label) in enumerate(self.trainLoader):
+			print data.shape
 			if self.gpu:
 				labelVar = ag.Variable(label.cuda(async = True))
 				ip = ag.Variable(data.cuda(async = True))
@@ -257,7 +237,7 @@ class MotionNetwork(object):
 			"model" : self.model.state_dict(),
 			"highestPrecision" : self.highestPrecision,
 			"optimizer" : self.optimizer.state_dict()
-			}, self.isBest, self.ckpLoc + SPATIAL_CKP_FILE, self.ckpLoc + SPATIAL_BEST_FILE)
+			}, self.isBest, self.ckpLoc + MOTION_CKP_FILE, self.ckpLoc + MOTION_BEST_FILE)
 		return
 
 
@@ -282,13 +262,13 @@ class MotionNetwork(object):
 
 def main():
 	imageTransforms = getTransforms()
-	trainDataset = MotionDataset(VIDEOLIST_TRAIN, FRAMES_DIR_TRAIN, imageTransforms, flowSampleSize = 2, actionLabelLoc = ACTIONLABEL_FILE)
-	trainDataLoader = getDataLoader(trainDataset, batchSize = 5)
+	trainDataset = TemporalDataset(VIDEOLIST_TRAIN, FLOW_DATA_DIR, imageTransforms, flowSampleSize = 10, actionLabelLoc = ACTIONLABEL_FILE)
+	trainDataLoader = getDataLoader(trainDataset, batchSize = 5, nWorkers = 1)
 	# the same image transforms for the test data as well
-	testDataset = MotionDataset(VIDEOLIST_TEST, FRAMES_DIR_TEST, imageTransforms, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
-	testDataLoader = getDataLoader(testDataset, batchSize = 2)
+	testDataset = TemporalDataset(VIDEOLIST_TEST, FLOW_DATA_DIR, imageTransforms, flowSampleSize = 10, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
+	testDataLoader = getDataLoader(testDataset, batchSize = 2, nWorkers = 1)
 	gpu = tch.cuda.is_available()
-	net = MotionNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
+	net = TemporalNetwork(NACTION_CLASSES, VIDEO_INPUT_FLOW_COUNT, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
 	net.execute()
 
 

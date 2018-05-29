@@ -15,36 +15,7 @@ import random
 import shutil
 import time
 from utils import *
-
-# Some parameters
-VIDEO_FRAME_SAMPLE_RATE = 10
-CONVERT = True
-VIDEO_INPUT_FRAME_COUNT = 3
-TRAIN_BATCH_SIZE = 2 
-NWORKERS_LOADER = 4 
-SHUFFLE_LOADER = True
-CROP_SIZE_TF = 224 
-HORIZONTAL_FLIP_TF = True 
-NORM_MEANS_TF = [0.485, 0.456, 0.406] 
-NORM_STDS_TF = [0.229, 0.224, 0.225]
-NACTION_CLASSES = 101
-NEPOCHS = 3
-INITIAL_LR = 0.001
-MOMENTUM_VAL = 0.9
-MILESTONES_LR = [1,2]
-
-# Some constants
-VIDEO_EXTN = ".avi"
-FRAME_EXTN = ".jpg"
-DATA_DIR = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101"
-FRAMES_DIR_TRAIN = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101-frames-train"
-FRAMES_DIR_TEST = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101-frames-test"
-VIDEOLIST_TRAIN = "/home/arc/VA_Assignments/Sheet03/demoTrain.txt"
-VIDEOLIST_TEST = "/home/arc/VA_Assignments/Sheet03/demoTest.txt"
-ACTIONLABEL_FILE = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101/ucfTrainTestlist/classInd.txt"
-CHECKPOINT_DIR = "./checkpoints/"
-SPATIAL_CKP_FILE = "spatial_ckp.pth.tar"
-SPATIAL_BEST_FILE = "spatial_best.pth.tar"
+from parameters import * 
 
 
 class SpatialDataset(Dataset):
@@ -117,35 +88,6 @@ class SpatialDataset(Dataset):
 
 
 
-def getTransforms(cropSize = CROP_SIZE_TF, hortizontalFlip = HORIZONTAL_FLIP_TF, normMeans = NORM_MEANS_TF, normStds = NORM_STDS_TF):
-	"""
-	Get image transformations based of provided parameters.
-	"""
-	imgTrans = []
-	if cropSize:
-		imgTrans.append(transforms.RandomCrop(224))
-	if hortizontalFlip:
-		imgTrans.append(transforms.RandomHorizontalFlip())
-	imgTrans.append(transforms.ToTensor())
-	if normMeans and normStds:
-		imgTrans.append(transforms.Normalize(mean = normMeans, std = normStds))
-	return transforms.Compose(imgTrans)
-
-
-
-def getDataLoader(dataset, batchSize = TRAIN_BATCH_SIZE, nWorkers = NWORKERS_LOADER, shuffle = SHUFFLE_LOADER):
-	"""
-	Return a torch dataloader with the given parameters.
-	"""
-	return DataLoader(
-		dataset = dataset, 
-		batch_size = batchSize,
-		shuffle = shuffle,
-		num_workers = nWorkers)
-
-
-
-
 class SpatialNetwork(object):
 	"""
 	A wrapper for the spatial stream.
@@ -185,7 +127,7 @@ class SpatialNetwork(object):
 		checkAndMakeDirectories(ckpLoc) # create the checkpoint folder if it doesn't exist already
 		self.ckpLoc = ckpLoc
 		self.resumeLoc = self.ckpLoc + SPATIAL_CKP_FILE
-		self.model = self.model.cuda() if self.gpu else self.model
+		self.model = nn.DataParallel(self.model) if self.gpu else self.model
 
 
 	def train(self):
