@@ -44,8 +44,9 @@ class TemporalDataset(Dataset):
 		self.imageTransforms = imageTransforms
 		self.flowSampleSize = flowSampleSize
 		self.mode = mode
+		self.videoLabelDict = {}
 		with open(videoListLoc, "r") as videoListFile:
-			self.videoList = [line for line in videoListFile]
+			self.videoList = [line for line in videoListFile][:20]
 		if actionLabelLoc is None:
 			raise ValueError("Action label dictionary required!")
 		with open(actionLabelLoc, "r") as actionLabelFile:
@@ -73,10 +74,11 @@ class TemporalDataset(Dataset):
 		if self.mode == "test":
 			# the test video list does not have numeric labels
 			actionLabel = self.actionLabelDict[actionCategory]
+		self.videoLabelDict[videoName] = actionLabel
 		flowDir = self.rootDir + actionCategory + "/" + videoName + "/"
 		# get the number of frames in the folder
 		nFlows = len([fName for fName in os.listdir(flowDir)]) / 2 # there x and y flows
-		iFlowFrame = random.randint(0, nFlows - self.flowSampleSize - 1) # load a random flow frame
+		iFlowFrame = random.randint(1, nFlows - self.flowSampleSize - 1) # load a random flow frame
 		xFlowFrames = [self.rootDir + actionCategory + "/" + videoName + "/" + X_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
 		yFlowFrames = [self.rootDir + actionCategory + "/" + videoName + "/" + Y_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
 		# combine the two lists alternatingly
@@ -89,7 +91,8 @@ class TemporalDataset(Dataset):
 		# combine the loaded frames into a flow volume (a 2*L channel image)
 		flowVolume = tch.squeeze(tch.stack(loadedFrames, dim = 0)) 
 		actionLabel = int(actionLabel)
-		return flowVolume, actionLabel # the chosen flow frames from the video and the action label
+		# return the chosen flow frames from the video and the action label
+		return flowVolume, actionLabel, videoName # we must extract video level descriptors
 
 
 
@@ -107,7 +110,9 @@ class TemporalNetwork(object):
 		self.nEpochs = nEpochs
 		self.lr = lr
 		self.trainLoader = trainLoader
+		self.totalTrain = len(self.trainLoader.dataset)
 		self.testLoader = testLoader
+		self.totalTest = len(self.testLoader.dataset)
 		self.lrMilestones = lrMilestones
 		self.flowSampleSize = flowSampleSize
 		self.gpu = gpu
@@ -117,10 +122,10 @@ class TemporalNetwork(object):
 			print "No GPU available!"
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
 		self.model = models.vgg16(pretrained = True)
-		self.__copyFirstLayer__(self.model) # modify first layer for 2*L channel motion volumes
+		self.__copyFirstLayer__() # modify first layer for 2*L channel motion volumes
 		self.model.features.requires_grad = False # fix the feature weights
 		# swap out the final layer; the magic numbers are VGG parameters
-		#self.model.classifier[6] = nn.Linear(in_features=4096, out_features = nActionClasses, bias = True)
+		self.model.classifier[6] = nn.Linear(in_features=4096, out_features = nActionClasses, bias = True)
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
 		# a simple SGD optimizer
 		self.optimizer = tch.optim.SGD(self.model.parameters(), self.lr, momentum = momentumVal) 
@@ -134,15 +139,21 @@ class TemporalNetwork(object):
 		checkAndMakeDirectories(ckpLoc) # create the checkpoint folder if it doesn't exist already
 		self.ckpLoc = ckpLoc
 		self.resumeLoc = self.ckpLoc + MOTION_CKP_FILE
+		self.features = self.model.features
+		self.classifierList = list(self.model.classifier)
+		self.classifierLen = len(self.classifierList)
+		# video level descriptor holders
+		self.trainDict = {} 
+		self.testDict = {}
 		self.model = nn.DataParallel(self.model) if self.gpu else self.model
 
 
-	def __copyFirstLayer__(self, vggNet):
+	def __copyFirstLayer__(self):
 		"""
 		Modifies the first layer of the VGG net to have the average of the original
 		three channel weights to be copied across all channels in the new input layer. 
 		"""
-		layerOne = vggNet.features[0]
+		layerOne = self.model.features[0]
 		avg = 0
 		for inChannel in range(layerOne.in_channels):
 			avg += layerOne.weight[:, inChannel, :, :]
@@ -150,7 +161,7 @@ class TemporalNetwork(object):
 		newLayerOne = nn.Conv2d(self.flowSampleSize * 2, layerOne.out_channels, kernel_size = layerOne.kernel_size, padding = layerOne.padding)
 		for inChannel in range(2 * self.flowSampleSize):
 			newLayerOne.weight.data[:, inChannel, :, :] = avg.data
-		vggNet.features[0] = newLayerOne
+		self.model.features[0] = newLayerOne
 
 
 
@@ -160,21 +171,34 @@ class TemporalNetwork(object):
 		"""
 		self.model.train() # switch to train mode
 		startTime = time.time()
-		for iBatch, (data, label) in enumerate(self.trainLoader):
-			print data.shape
+		featureVectors = None
+		for iBatch, (data, labels, videoNames) in enumerate(self.trainLoader):
 			if self.gpu:
-				labelVar = ag.Variable(label.cuda(async = True))
+				labelVar = ag.Variable(labels.cuda(async = True))
 				ip = ag.Variable(data.cuda(async = True))
 			else:
-				labelVar = ag.Variable(label)
+				labelVar = ag.Variable(labels)
 				ip = ag.Variable(data)
-			op = self.model(ip)
+			op = self.features(ip)
+			op = op.view(op.size(0), -1)
+			for cl in self.classifierList[:(self.classifierLen - 1)]: # evaluate till second last layer
+				op = cl(op)
+			featureVectors = op # keep the second last layer's output as the feature vector
+			for cl in self.classifierList[(self.classifierLen - 1):]: # continue till last layer
+				op = cl(op)
 			loss = self.criterion(op, labelVar)
 			self.optimizer.zero_grad()
 			loss.backward()
 			self.optimizer.step()
+			# collate video level features
+			for i in range(len(featureVectors)):
+				if videoNames[i] in self.trainDict:
+					self.trainDict[videoNames[i]].update(featureVectors[i])
+				else:
+					self.trainDict[videoNames[i]] = AverageMeter()
+					self.trainDict[videoNames[i]].update(featureVectors[i])
 
-		torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
+		# torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
 		endTime = time.time()
 		duration = endTime - startTime
 		print "Epoch %d completed in %lf seconds" % (self.epoch, duration)
@@ -187,27 +211,35 @@ class TemporalNetwork(object):
 		"""
 		self.model.eval() # switch to evaluation mode
 		correct = 0
-		total = len(self.testLoader.dataset)
 		loss = 0
 		with tch.no_grad():
-			for iBatch, (data, label) in enumerate(self.testLoader):
+			for iBatch, (data, label, videoNames) in enumerate(self.testLoader):
 				if self.gpu:
 					labelVar = ag.Variable(label.cuda(async = True))
 					ip = ag.Variable(data.cuda(async = True))
 				else:
 					labelVar = ag.Variable(label)
 					ip = ag.Variable(data)
-				op = self.model(ip)
-				# print self.model.classifier[0].weight
-				# print op.shape
+				op = self.features(ip)
+				op = op.view(op.size(0), -1)
+				for cl in self.classifierList[:(self.classifierLen - 1)]: # evaluate till second last layer
+					op = cl(op)
+				featureVectors = op # keep the second last layer's output as the feature vector
+				for cl in self.classifierList[(self.classifierLen - 1):]: # continue till last layer
+					op = cl(op)
 				loss += self.criterion(op, labelVar) # total loss
 				pred = op.max(1, keepdim=True)[1] # get the index of the max log-probability
-				# print op.shape
-				# print labelVar.shape
 				correct += pred.eq(labelVar.view_as(pred)).sum().item()
-		print self.epoch, total, correct, loss.item()
-		print "Validation for epoch %d: total = %d, correct = %d, loss = %lf" % (self.epoch, total, correct, loss.item())
-		return (correct / total), loss
+				# collate video level features
+				for i in range(len(featureVectors)):
+					if videoNames[i] in self.testDict:
+						self.testDict[videoNames[i]].update(featureVectors[i])
+					else:
+						self.testDict[videoNames[i]] = AverageMeter()
+						self.testDict[videoNames[i]].update(featureVectors[i])
+
+		print "Validation for epoch %d: total = %d, correct = %d, loss = %lf" % (self.epoch, self.totalTest, correct, loss.item())
+		return (correct / self.totalTest), loss
 
 
 	def resume(self):
@@ -256,17 +288,36 @@ class TemporalNetwork(object):
 				self.isBest = True
 			self.scheduler.step(loss)
 			self.save() # save state
-		return
+		# save video level descriptors
+		self.saveVideoDescriptors(self.trainDict, TEMPORAL_TRAIN_CSV_LOC)
+		self.saveVideoDescriptors(self.testDict, TEMPORAL_TEST_CSV_LOC)
+
+
+	def saveVideoDescriptors(self, videoDescDict, csvLoc):
+		"""
+		Write out the video descriptors to disk for later use.
+		"""
+		try:
+			os.remove(csvLoc)
+		except OSError:
+			pass
+		print self.trainLoader.dataset.videoLabelDict
+		with open(csvLoc, "a") as csvFile:
+			for videoName in videoDescDict.keys():
+				videoLabel = self.trainLoader.dataset.videoLabelDict[videoName]
+				videoDesc = videoDescDict[videoName].avg
+				writeText = str(videoDesc) + "," + str(videoLabel) + "\n"
+				csvFile.write(writeText)
 
 
 
 def main():
 	imageTransforms = getTransforms()
 	trainDataset = TemporalDataset(VIDEOLIST_TRAIN, FLOW_DATA_DIR, imageTransforms, flowSampleSize = 10, actionLabelLoc = ACTIONLABEL_FILE)
-	trainDataLoader = getDataLoader(trainDataset, batchSize = 5, nWorkers = 1)
+	trainDataLoader = getDataLoader(trainDataset, batchSize = 5)
 	# the same image transforms for the test data as well
 	testDataset = TemporalDataset(VIDEOLIST_TEST, FLOW_DATA_DIR, imageTransforms, flowSampleSize = 10, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
-	testDataLoader = getDataLoader(testDataset, batchSize = 2, nWorkers = 1)
+	testDataLoader = getDataLoader(testDataset, batchSize = 2)
 	gpu = tch.cuda.is_available()
 	net = TemporalNetwork(NACTION_CLASSES, VIDEO_INPUT_FLOW_COUNT, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
 	net.execute()

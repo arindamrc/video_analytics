@@ -1,6 +1,6 @@
 # Some parameters
 VIDEO_FRAME_SAMPLE_RATE = 10
-CONVERT = True
+CONVERT = False
 VIDEO_INPUT_FRAME_COUNT = 3
 VIDEO_INPUT_FLOW_COUNT = 10
 TRAIN_BATCH_SIZE = 2 
@@ -29,7 +29,9 @@ ACTIONLABEL_FILE = "/home/arc/VA_Assignments/Sheet03/mini-UCF-101/ucfTrainTestli
 CHECKPOINT_DIR = "./checkpoints/"
 SPATIAL_CKP_FILE = "spatial_ckp.pth.tar"
 SPATIAL_BEST_FILE = "spatial_best.pth.tar"
-MOTION_CKP_FILE = "motion_ckp.pth.tar"
-MOTION_BEST_FILE = "motion_best.pth.tar"
+MOTION_CKP_FILE = "temporal_ckp.pth.tar"
+MOTION_BEST_FILE = "temporal_best.pth.tar"
 X_PREFIX_FLOW = "flow_x_"
 Y_PREFIX_FLOW = "flow_y_"
+TEMPORAL_TRAIN_CSV_LOC = "./temporal_train.csv"
+TEMPORAL_TEST_CSV_LOC = "./temporal_test.csv"

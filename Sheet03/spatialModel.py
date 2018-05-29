@@ -72,19 +72,13 @@ class SpatialDataset(Dataset):
 		frameDir = self.rootDir + actionCategory + "/" + videoName + "/"
 		# get the number of frames in the folder
 		nFrames = len([frameName for frameName in os.listdir(frameDir)])
-		# frameNames = sorted(random.sample(range(1, nFrames), self.frameSampleSize)) # get random frame names
-		# if self.imageTransforms is not None:
-		# 	loadedFrames = [self.imageTransforms(Image.open(frameDir + str(frame) + FRAME_EXTN)) for frame in frameNames]
-		# else:
-		# 	loadedFrames = [transforms.ToTensor(Image.open(frameDir + str(frame) + FRAME_EXTN)) for frame in frameNames]
-		# loadedFrames = tch.stack(loadedFrames) # convert the list into a tensor
 		frameName = random.randint(0, nFrames - 1) # load a random frame
 		if self.imageTransforms is not None:
 			loadedFrame = self.imageTransforms(Image.open(frameDir + str(frameName) + FRAME_EXTN))
 		else:
 			loadedFrame = transforms.ToTensor(Image.open(frameDir + str(frameName) + FRAME_EXTN))
 		actionLabel = int(actionLabel)
-		return loadedFrame, actionLabel # the chosen frames from the video and the action label
+		return loadedFrame, actionLabel, videoName # the chosen frames from the video and the action label
 
 
 
@@ -127,6 +121,9 @@ class SpatialNetwork(object):
 		checkAndMakeDirectories(ckpLoc) # create the checkpoint folder if it doesn't exist already
 		self.ckpLoc = ckpLoc
 		self.resumeLoc = self.ckpLoc + SPATIAL_CKP_FILE
+		self.features = self.model.features
+		self.classifierList = list(self.model.classifier)
+		self.classifierLen = len(self.classifierList)
 		self.model = nn.DataParallel(self.model) if self.gpu else self.model
 
 
@@ -143,13 +140,19 @@ class SpatialNetwork(object):
 			else:
 				labelVar = ag.Variable(label)
 				ip = ag.Variable(data)
-			op = self.model(ip)
+			op = self.features(ip)
+			op = op.view(op.size(0), -1)
+			for cl in self.classifierList[:(self.classifierLen - 1)]: # evaluate till second last layer
+				op = cl(op)
+			featureVectors = op # keep the second last layer's output as the feature vector
+			for cl in self.classifierList[(self.classifierLen - 1):]: # continue till last layer
+				op = cl(op)
 			loss = self.criterion(op, labelVar)
 			self.optimizer.zero_grad()
 			loss.backward()
 			self.optimizer.step()
 
-		torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
+		# torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
 		endTime = time.time()
 		duration = endTime - startTime
 		print "Epoch %d completed in %lf seconds" % (self.epoch, duration)
@@ -172,13 +175,15 @@ class SpatialNetwork(object):
 				else:
 					labelVar = ag.Variable(label)
 					ip = ag.Variable(data)
-				op = self.model(ip)
-				# print self.model.classifier[0].weight
-				# print op.shape
+				op = self.features(ip)
+				op = op.view(op.size(0), -1)
+				for cl in self.classifierList[:(self.classifierLen - 1)]: # evaluate till second last layer
+					op = cl(op)
+				featureVectors = op # keep the second last layer's output as the feature vector
+				for cl in self.classifierList[(self.classifierLen - 1):]: # continue till last layer
+					op = cl(op)
 				loss += self.criterion(op, labelVar) # total loss
 				pred = op.max(1, keepdim=True)[1] # get the index of the max log-probability
-				# print op.shape
-				# print labelVar.shape
 				correct += pred.eq(labelVar.view_as(pred)).sum().item()
 		print self.epoch, total, correct, loss.item()
 		print "Validation for epoch %d: total = %d, correct = %d, loss = %lf" % (self.epoch, total, correct, loss.item())
