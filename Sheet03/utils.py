@@ -60,7 +60,7 @@ def extractEveryNthFrame(videoLoc, N):
 	while(cap.isOpened()):
 		ret, frame = cap.read()
 		if not ret:
-			print "capture done"
+			#print "capture done"
 			break
 		if frameIdx % N == 0:
 			frameList.append(frame)
@@ -169,7 +169,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def saveVideoDescriptors(videoDescDict, csvLoc):
+def saveVideoDescriptors(videoDescDict, csvLoc, gpu = False):
 	"""
 	Write out the video descriptors to disk for later use.
 	Format is <video-name>,<label>,<4096 dim comma separated descriptor>.
@@ -186,7 +186,10 @@ def saveVideoDescriptors(videoDescDict, csvLoc):
 			# the first and second columns contain the video name and label respectively
 			csvFile.write(videoName + "," + str(videoLabel) + ",") 
 			videoDesc = videoDescDict[videoName][0].avg
-			videoDesc = videoDesc.data.numpy().astype(float)
+			if gpu:
+				videoDesc = videoDesc.cpu().data.numpy().astype(float)
+			else:
+				videoDesc = videoDesc.data.numpy().astype(float)
 			writer.writerow(videoDesc) 
 
 
