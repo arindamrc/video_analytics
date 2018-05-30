@@ -122,7 +122,7 @@ def convertVideosToFrames(rootDir, saveDir, videoListLoc, sampleRate = VIDEO_FRA
 
 
 
-def getDataLoader(dataset, batchSize = TRAIN_BATCH_SIZE, nWorkers = NWORKERS_LOADER, shuffle = SHUFFLE_LOADER):
+def getDataLoader(dataset, batchSize = TEMPORAL_BATCH_SIZE, nWorkers = NWORKERS_LOADER, shuffle = SHUFFLE_LOADER):
 	"""
 	Return a torch dataloader with the given parameters.
 	"""

@@ -121,7 +121,7 @@ class TemporalNetwork(object):
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
 		self.model = models.vgg16(pretrained = True)
 		self.__copyFirstLayer__() # modify first layer for 2*L channel motion volumes
-		self.model.features.requires_grad = False # fix the feature weights
+		self.model.features[0:N_FIXED_LAYERS].requires_grad = False # fix the feature weights of the first few layers
 		# swap out the final layer
 		self.__swapClassifier__()
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
@@ -216,7 +216,7 @@ class TemporalNetwork(object):
 					self.trainDict[videoNames[i]] = (AverageMeter(), labels[i])
 					self.trainDict[videoNames[i]][0].update(featureVectors[i])
 
-		# torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
+		nn.utils.clip_grad_norm_(self.model.module.classifier.parameters(), max_norm=1.0) # clip gradients to avoid vanishig or exploding
 		endTime = time.time()
 		duration = endTime - startTime
 		print "Epoch %d completed in %lf seconds" % (self.epoch, duration)
@@ -315,10 +315,10 @@ class TemporalNetwork(object):
 def main():
 	imageTransforms = getTransforms()
 	trainDataset = TemporalDataset(VIDEOLIST_TRAIN, FLOW_DATA_DIR, imageTransforms, flowSampleSize = VIDEO_INPUT_FLOW_COUNT, actionLabelLoc = ACTIONLABEL_FILE)
-	trainDataLoader = getDataLoader(trainDataset, batchSize = TRAIN_BATCH_SIZE)
+	trainDataLoader = getDataLoader(trainDataset, batchSize = TEMPORAL_BATCH_SIZE)
 	# the same image transforms for the test data as well
 	testDataset = TemporalDataset(VIDEOLIST_TEST, FLOW_DATA_DIR, imageTransforms, flowSampleSize = VIDEO_INPUT_FLOW_COUNT, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
-	testDataLoader = getDataLoader(testDataset, batchSize = TRAIN_BATCH_SIZE)
+	testDataLoader = getDataLoader(testDataset, batchSize = TEMPORAL_BATCH_SIZE)
 	gpu = tch.cuda.is_available()
 	net = TemporalNetwork(NACTION_CLASSES, VIDEO_INPUT_FLOW_COUNT, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, VIDEO_DESCRIPTOR_DIM, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = True)
 	net.execute()
