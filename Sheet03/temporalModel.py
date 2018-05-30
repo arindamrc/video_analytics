@@ -192,8 +192,8 @@ class TemporalNetwork(object):
 		featureVectors = None
 		for iBatch, (data, labels, videoNames) in enumerate(self.trainLoader):
 			if self.gpu:
-				labelVar = ag.Variable(labels.cuda(async = True))
-				ip = ag.Variable(data.cuda(async = True))
+				labelVar = ag.Variable(labels).cuda(async = True)
+				ip = ag.Variable(data).cuda(async = True)
 			else:
 				labelVar = ag.Variable(labels)
 				ip = ag.Variable(data)
@@ -233,8 +233,8 @@ class TemporalNetwork(object):
 		with tch.no_grad():
 			for iBatch, (data, labels, videoNames) in enumerate(self.testLoader):
 				if self.gpu:
-					labelVar = ag.Variable(labels.cuda(async = True))
-					ip = ag.Variable(data.cuda(async = True))
+					labelVar = ag.Variable(labels, volatile = True).cuda(async = True)
+					ip = ag.Variable(data, volatile = True).cuda(async = True)
 				else:
 					labelVar = ag.Variable(labels)
 					ip = ag.Variable(data)
