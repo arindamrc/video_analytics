@@ -188,3 +188,13 @@ def saveVideoDescriptors(videoDescDict, csvLoc):
 			videoDesc = videoDescDict[videoName][0].avg
 			videoDesc = videoDesc.data.numpy().astype(float)
 			writer.writerow(videoDesc) 
+
+
+def savePerformance(precision, loss, csvLoc):
+	"""
+	Save the precision and loss value of each epoch.
+	"""
+	with open(csvLoc, "a") as csvFile:
+		writeText = str(precision) + "," + str(loss) + "\n"
+		csvFile.write(writeText)
+	return

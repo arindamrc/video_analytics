@@ -14,7 +14,6 @@ import os
 import random
 import shutil
 import time
-import torch
 import itertools
 from utils import *
 from parameters import *
@@ -99,7 +98,7 @@ class TemporalNetwork(object):
 	A wrapper for the motion stream.
 	"""
 
-	def __init__(self, nActionClasses, flowSampleSize, nEpochs, lr, momentumVal, trainLoader, testLoader, lrMilestones, ckpLoc, gpu = False):
+	def __init__(self, nActionClasses, flowSampleSize, nEpochs, lr, momentumVal, descriptorDim, trainLoader, testLoader, lrMilestones, ckpLoc, gpu = False):
 		"""
 		Initialize the model
 		"""
@@ -113,6 +112,7 @@ class TemporalNetwork(object):
 		self.totalTest = len(self.testLoader.dataset)
 		self.lrMilestones = lrMilestones
 		self.flowSampleSize = flowSampleSize
+		self.descriptorDim = descriptorDim
 		self.gpu = gpu
 		if self.gpu:
 			print "GPU available!"
@@ -122,8 +122,8 @@ class TemporalNetwork(object):
 		self.model = models.vgg16(pretrained = True)
 		self.__copyFirstLayer__() # modify first layer for 2*L channel motion volumes
 		self.model.features.requires_grad = False # fix the feature weights
-		# swap out the final layer; the magic numbers are VGG parameters
-		self.model.classifier[6] = nn.Linear(in_features=4096, out_features = nActionClasses, bias = True)
+		# swap out the final layer
+		self.__swapClassifier__()
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
 		# a simple SGD optimizer
 		self.optimizer = tch.optim.SGD(self.model.parameters(), self.lr, momentum = momentumVal) 
@@ -160,6 +160,26 @@ class TemporalNetwork(object):
 		for inChannel in range(2 * self.flowSampleSize):
 			newLayerOne.weight.data[:, inChannel, :, :] = avg.data
 		self.model.features[0] = newLayerOne
+
+
+	def __swapClassifier__(self):
+		"""
+		Swap the classifier layer of vgg16 for a custom one. 
+		The video descriptor's dimension can be set.
+		"""
+		self.model.classifier = nn.Sequential(
+            nn.Linear(512 * 7 * 7, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, self.descriptorDim),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(self.descriptorDim, self.nActionClasses),
+        )
+
 
 
 
@@ -286,6 +306,7 @@ class TemporalNetwork(object):
 				self.isBest = True
 			self.scheduler.step(loss)
 			self.save() # save state
+			savePerformance(precision, loss.data.item(), TEMPORAL_PERFORMANCE_LOC) # save epoch performance
 			# save video level descriptors
 			saveVideoDescriptors(self.trainDict, TEMPORAL_TRAIN_CSV_LOC)
 			saveVideoDescriptors(self.testDict, TEMPORAL_TEST_CSV_LOC)
@@ -299,7 +320,7 @@ def main():
 	testDataset = TemporalDataset(VIDEOLIST_TEST, FLOW_DATA_DIR, imageTransforms, flowSampleSize = 10, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
 	testDataLoader = getDataLoader(testDataset, batchSize = 2)
 	gpu = tch.cuda.is_available()
-	net = TemporalNetwork(NACTION_CLASSES, VIDEO_INPUT_FLOW_COUNT, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
+	net = TemporalNetwork(NACTION_CLASSES, VIDEO_INPUT_FLOW_COUNT, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, VIDEO_DESCRIPTOR_DIM, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
 	net.execute()
 
 

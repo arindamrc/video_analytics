@@ -15,6 +15,7 @@ NEPOCHS = 3
 INITIAL_LR = 0.001
 MOMENTUM_VAL = 0.9
 MILESTONES_LR = [1,2]
+VIDEO_DESCRIPTOR_DIM = 256
 
 # Some constants
 VIDEO_EXTN = ".avi"
@@ -37,3 +38,5 @@ TEMPORAL_TRAIN_CSV_LOC = "./temporal_train.csv"
 TEMPORAL_TEST_CSV_LOC = "./temporal_test.csv"
 SPATIAL_TEST_CSV_LOC = "./spatial_test.csv"
 SPATIAL_TRAIN_CSV_LOC = "./spatial_train.csv"
+SPATIAL_PERFORMANCE_LOC = "./spatial_performance.csv"
+TEMPORAL_PERFORMANCE_LOC = "./temporal_performance.csv"

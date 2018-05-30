@@ -87,7 +87,7 @@ class SpatialNetwork(object):
 	A wrapper for the spatial stream.
 	"""
 
-	def __init__(self, nActionClasses, nEpochs, lr, momentumVal, trainLoader, testLoader, lrMilestones, ckpLoc, gpu = False):
+	def __init__(self, nActionClasses, nEpochs, lr, momentumVal, descriptorDim, trainLoader, testLoader, lrMilestones, ckpLoc, gpu = False):
 		"""
 		Initialize the model
 		"""
@@ -100,6 +100,7 @@ class SpatialNetwork(object):
 		self.testLoader = testLoader
 		self.totalTest = len(self.testLoader.dataset)
 		self.lrMilestones = lrMilestones
+		self.descriptorDim = descriptorDim
 		self.gpu = gpu
 		if self.gpu:
 			print "GPU available!"
@@ -108,8 +109,8 @@ class SpatialNetwork(object):
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
 		self.model = models.vgg16(pretrained = True)
 		self.model.features.require_grad = False # fix the feature weights
-		# swap out the final layer; the magic numbers are VGG parameters
-		self.model.classifier[6] = nn.Linear(in_features=4096, out_features = nActionClasses, bias = True)
+		# swap out the final layer
+		self.__swapClassifier__()
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
 		# a simple SGD optimizer
 		self.optimizer = tch.optim.SGD(self.model.parameters(), self.lr, momentum = momentumVal) 
@@ -130,6 +131,27 @@ class SpatialNetwork(object):
 		self.trainDict = {} 
 		self.testDict = {}
 		self.model = nn.DataParallel(self.model) if self.gpu else self.model
+
+
+	def __swapClassifier__(self):
+		"""
+		Swap the classifier layer of vgg16 for a custom one. 
+		The video descriptor's dimension can be set.
+		"""
+		self.model.classifier = nn.Sequential(
+            nn.Linear(512 * 7 * 7, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, self.descriptorDim),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(self.descriptorDim, self.nActionClasses),
+        )
+
+
 
 
 	def train(self):
@@ -255,6 +277,7 @@ class SpatialNetwork(object):
 				self.isBest = True
 			self.scheduler.step(loss)
 			self.save() # save state
+			savePerformance(precision, loss.data.item(), SPATIAL_PERFORMANCE_LOC) # save epoch performance
 			# save video level descriptors
 			saveVideoDescriptors(self.trainDict, SPATIAL_TRAIN_CSV_LOC)
 			saveVideoDescriptors(self.testDict, SPATIAL_TEST_CSV_LOC)
@@ -271,7 +294,7 @@ def main():
 	testDataset = SpatialDataset(VIDEOLIST_TEST, FRAMES_DIR_TEST, imageTransforms, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
 	testDataLoader = getDataLoader(testDataset, batchSize = 2)
 	gpu = tch.cuda.is_available()
-	net = SpatialNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
+	net = SpatialNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, VIDEO_DESCRIPTOR_DIM, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
 	net.execute()
 
 
