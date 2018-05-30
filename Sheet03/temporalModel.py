@@ -44,7 +44,6 @@ class TemporalDataset(Dataset):
 		self.imageTransforms = imageTransforms
 		self.flowSampleSize = flowSampleSize
 		self.mode = mode
-		self.videoLabelDict = {}
 		with open(videoListLoc, "r") as videoListFile:
 			self.videoList = [line for line in videoListFile][:20]
 		if actionLabelLoc is None:
@@ -74,7 +73,7 @@ class TemporalDataset(Dataset):
 		if self.mode == "test":
 			# the test video list does not have numeric labels
 			actionLabel = self.actionLabelDict[actionCategory]
-		self.videoLabelDict[videoName] = actionLabel
+		actionLabel = int(actionLabel)
 		flowDir = self.rootDir + actionCategory + "/" + videoName + "/"
 		# get the number of frames in the folder
 		nFlows = len([fName for fName in os.listdir(flowDir)]) / 2 # there x and y flows
@@ -90,7 +89,6 @@ class TemporalDataset(Dataset):
 			loadedFrames = [transforms.ToTensor(Image.open(frame)) for frame in flowFrames]
 		# combine the loaded frames into a flow volume (a 2*L channel image)
 		flowVolume = tch.squeeze(tch.stack(loadedFrames, dim = 0)) 
-		actionLabel = int(actionLabel)
 		# return the chosen flow frames from the video and the action label
 		return flowVolume, actionLabel, videoName # we must extract video level descriptors
 
@@ -193,10 +191,10 @@ class TemporalNetwork(object):
 			# collate video level features
 			for i in range(len(featureVectors)):
 				if videoNames[i] in self.trainDict:
-					self.trainDict[videoNames[i]].update(featureVectors[i])
+					self.trainDict[videoNames[i]][0].update(featureVectors[i])
 				else:
-					self.trainDict[videoNames[i]] = AverageMeter()
-					self.trainDict[videoNames[i]].update(featureVectors[i])
+					self.trainDict[videoNames[i]] = (AverageMeter(), labels[i])
+					self.trainDict[videoNames[i]][0].update(featureVectors[i])
 
 		# torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
 		endTime = time.time()
@@ -213,12 +211,12 @@ class TemporalNetwork(object):
 		correct = 0
 		loss = 0
 		with tch.no_grad():
-			for iBatch, (data, label, videoNames) in enumerate(self.testLoader):
+			for iBatch, (data, labels, videoNames) in enumerate(self.testLoader):
 				if self.gpu:
-					labelVar = ag.Variable(label.cuda(async = True))
+					labelVar = ag.Variable(labels.cuda(async = True))
 					ip = ag.Variable(data.cuda(async = True))
 				else:
-					labelVar = ag.Variable(label)
+					labelVar = ag.Variable(labels)
 					ip = ag.Variable(data)
 				op = self.features(ip)
 				op = op.view(op.size(0), -1)
@@ -233,10 +231,10 @@ class TemporalNetwork(object):
 				# collate video level features
 				for i in range(len(featureVectors)):
 					if videoNames[i] in self.testDict:
-						self.testDict[videoNames[i]].update(featureVectors[i])
+						self.testDict[videoNames[i]][0].update(featureVectors[i])
 					else:
-						self.testDict[videoNames[i]] = AverageMeter()
-						self.testDict[videoNames[i]].update(featureVectors[i])
+						self.testDict[videoNames[i]] = (AverageMeter(), labels[i])
+						self.testDict[videoNames[i]][0].update(featureVectors[i])
 
 		print "Validation for epoch %d: total = %d, correct = %d, loss = %lf" % (self.epoch, self.totalTest, correct, loss.item())
 		return (correct / self.totalTest), loss
@@ -288,27 +286,9 @@ class TemporalNetwork(object):
 				self.isBest = True
 			self.scheduler.step(loss)
 			self.save() # save state
-		# save video level descriptors
-		self.saveVideoDescriptors(self.trainDict, TEMPORAL_TRAIN_CSV_LOC)
-		self.saveVideoDescriptors(self.testDict, TEMPORAL_TEST_CSV_LOC)
-
-
-	def saveVideoDescriptors(self, videoDescDict, csvLoc):
-		"""
-		Write out the video descriptors to disk for later use.
-		"""
-		try:
-			os.remove(csvLoc)
-		except OSError:
-			pass
-		print self.trainLoader.dataset.videoLabelDict
-		with open(csvLoc, "a") as csvFile:
-			for videoName in videoDescDict.keys():
-				videoLabel = self.trainLoader.dataset.videoLabelDict[videoName]
-				videoDesc = videoDescDict[videoName].avg
-				writeText = str(videoDesc) + "," + str(videoLabel) + "\n"
-				csvFile.write(writeText)
-
+			# save video level descriptors
+			saveVideoDescriptors(self.trainDict, TEMPORAL_TRAIN_CSV_LOC)
+			saveVideoDescriptors(self.testDict, TEMPORAL_TEST_CSV_LOC)
 
 
 def main():

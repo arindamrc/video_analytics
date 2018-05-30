@@ -6,6 +6,7 @@ import numpy as np
 import cv2
 import os
 import shutil
+import csv
 from parameters import *
 
 # Some utilities
@@ -166,3 +167,24 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+
+def saveVideoDescriptors(videoDescDict, csvLoc):
+	"""
+	Write out the video descriptors to disk for later use.
+	Format is <video-name>,<label>,<4096 dim comma separated descriptor>.
+	Thus each line has 4098 comma separated elements.
+	"""
+	try:
+		os.remove(csvLoc)
+	except OSError:
+		pass
+	with open(csvLoc, "a") as csvFile:
+		writer = csv.writer(csvFile, delimiter = ",")
+		for videoName in videoDescDict.keys():
+			videoLabel = videoDescDict[videoName][1].data.numpy()
+			# the first and second columns contain the video name and label respectively
+			csvFile.write(videoName + "," + str(videoLabel) + ",") 
+			videoDesc = videoDescDict[videoName][0].avg
+			videoDesc = videoDesc.data.numpy().astype(float)
+			writer.writerow(videoDesc) 

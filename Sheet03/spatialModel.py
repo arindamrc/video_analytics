@@ -41,7 +41,7 @@ class SpatialDataset(Dataset):
 		self.frameSampleSize = frameSampleSize
 		self.mode = mode
 		with open(videoListLoc, "r") as videoListFile:
-			self.videoList = [line for line in videoListFile]
+			self.videoList = [line for line in videoListFile][:20]
 		if actionLabelLoc is None:
 			raise ValueError("Action label dictionary required!")
 		with open(actionLabelLoc, "r") as actionLabelFile:
@@ -96,7 +96,9 @@ class SpatialNetwork(object):
 		self.nEpochs = nEpochs
 		self.lr = lr
 		self.trainLoader = trainLoader
+		self.totalTrain = len(self.trainLoader.dataset)
 		self.testLoader = testLoader
+		self.totalTest = len(self.testLoader.dataset)
 		self.lrMilestones = lrMilestones
 		self.gpu = gpu
 		if self.gpu:
@@ -124,6 +126,9 @@ class SpatialNetwork(object):
 		self.features = self.model.features
 		self.classifierList = list(self.model.classifier)
 		self.classifierLen = len(self.classifierList)
+		# video level descriptor holders
+		self.trainDict = {} 
+		self.testDict = {}
 		self.model = nn.DataParallel(self.model) if self.gpu else self.model
 
 
@@ -133,12 +138,13 @@ class SpatialNetwork(object):
 		"""
 		self.model.train() # switch to train mode
 		startTime = time.time()
-		for iBatch, (data, label) in enumerate(self.trainLoader):
+		featureVectors = None
+		for iBatch, (data, labels, videoNames) in enumerate(self.trainLoader):
 			if self.gpu:
-				labelVar = ag.Variable(label.cuda(async = True))
+				labelVar = ag.Variable(labels.cuda(async = True))
 				ip = ag.Variable(data.cuda(async = True))
 			else:
-				labelVar = ag.Variable(label)
+				labelVar = ag.Variable(labels)
 				ip = ag.Variable(data)
 			op = self.features(ip)
 			op = op.view(op.size(0), -1)
@@ -151,6 +157,13 @@ class SpatialNetwork(object):
 			self.optimizer.zero_grad()
 			loss.backward()
 			self.optimizer.step()
+			# collate video level features
+			for i in range(len(featureVectors)):
+				if videoNames[i] in self.trainDict:
+					self.trainDict[videoNames[i]][0].update(featureVectors[i])
+				else:
+					self.trainDict[videoNames[i]] = (AverageMeter(), labels[i])
+					self.trainDict[videoNames[i]][0].update(featureVectors[i])
 
 		# torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
 		endTime = time.time()
@@ -165,15 +178,14 @@ class SpatialNetwork(object):
 		"""
 		self.model.eval() # switch to evaluation mode
 		correct = 0
-		total = len(self.testLoader.dataset)
 		loss = 0
 		with tch.no_grad():
-			for iBatch, (data, label) in enumerate(self.testLoader):
+			for iBatch, (data, labels, videoNames) in enumerate(self.testLoader):
 				if self.gpu:
-					labelVar = ag.Variable(label.cuda(async = True))
+					labelVar = ag.Variable(labels.cuda(async = True))
 					ip = ag.Variable(data.cuda(async = True))
 				else:
-					labelVar = ag.Variable(label)
+					labelVar = ag.Variable(labels)
 					ip = ag.Variable(data)
 				op = self.features(ip)
 				op = op.view(op.size(0), -1)
@@ -185,9 +197,16 @@ class SpatialNetwork(object):
 				loss += self.criterion(op, labelVar) # total loss
 				pred = op.max(1, keepdim=True)[1] # get the index of the max log-probability
 				correct += pred.eq(labelVar.view_as(pred)).sum().item()
-		print self.epoch, total, correct, loss.item()
-		print "Validation for epoch %d: total = %d, correct = %d, loss = %lf" % (self.epoch, total, correct, loss.item())
-		return (correct / total), loss
+				# collate video level features
+				for i in range(len(featureVectors)):
+					if videoNames[i] in self.testDict:
+						self.testDict[videoNames[i]][0].update(featureVectors[i])
+					else:
+						self.testDict[videoNames[i]] = (AverageMeter(), labels[i])
+						self.testDict[videoNames[i]][0].update(featureVectors[i])
+
+		print "Validation for epoch %d: total = %d, correct = %d, loss = %lf" % (self.epoch, self.totalTest, correct, loss.item())
+		return (correct / self.totalTest), loss
 
 
 	def resume(self):
@@ -236,8 +255,9 @@ class SpatialNetwork(object):
 				self.isBest = True
 			self.scheduler.step(loss)
 			self.save() # save state
-		return
-
+			# save video level descriptors
+			saveVideoDescriptors(self.trainDict, SPATIAL_TRAIN_CSV_LOC)
+			saveVideoDescriptors(self.testDict, SPATIAL_TEST_CSV_LOC)
 
 
 def main():
