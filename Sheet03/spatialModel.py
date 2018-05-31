@@ -108,7 +108,7 @@ class SpatialNetwork(object):
 			print "No GPU available!"
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
 		self.model = models.vgg16(pretrained = True)
-		self.model.features[0:N_FIXED_LAYERS].require_grad = False # fix the feature weights of the first few layers
+		# self.model.features[0:N_FIXED_LAYERS].require_grad = False # fix the feature weights of the first few layers
 		# swap out the final layer
 		self.__swapClassifier__()
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
@@ -178,6 +178,7 @@ class SpatialNetwork(object):
 			loss = self.criterion(op, labelVar)
 			self.optimizer.zero_grad()
 			loss.backward()
+			nn.utils.clip_grad_norm_(self.model.module.parameters(), max_norm=1.0) # avoid vanishing or exploding gradients
 			self.optimizer.step()
 			# collate video level features
 			for i in range(len(featureVectors)):
@@ -187,7 +188,6 @@ class SpatialNetwork(object):
 					self.trainDict[videoNames[i]] = (AverageMeter(), labels[i])
 					self.trainDict[videoNames[i]][0].update(featureVectors[i])
 
-		nn.utils.clip_grad_norm_(self.model.module.parameters(), max_norm=1.0) # avoid vanishing or exploding gradients
 		endTime = time.time()
 		duration = endTime - startTime
 		print "Epoch %d completed in %lf seconds" % (self.epoch, duration)
