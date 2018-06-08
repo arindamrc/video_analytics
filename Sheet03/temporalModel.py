@@ -44,7 +44,7 @@ class TemporalDataset(Dataset):
 		self.flowSampleSize = flowSampleSize
 		self.mode = mode
 		with open(videoListLoc, "r") as videoListFile:
-			self.videoList = [line for line in videoListFile][:20]
+			self.videoList = [line for line in videoListFile]
 		if actionLabelLoc is None:
 			raise ValueError("Action label dictionary required!")
 		with open(actionLabelLoc, "r") as actionLabelFile:
@@ -76,7 +76,7 @@ class TemporalDataset(Dataset):
 		flowDir = self.rootDir + actionCategory + "/" + videoName + "/"
 		# get the number of frames in the folder
 		nFlows = len([fName for fName in os.listdir(flowDir)]) / 2 # there x and y flows
-		iFlowFrame = random.randint(1, nFlows - self.flowSampleSize - 1) # load a random flow frame
+		iFlowFrame = random.randint(1, nFlows - self.flowSampleSize) # load a random flow frame
 		xFlowFrames = [self.rootDir + actionCategory + "/" + videoName + "/" + X_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
 		yFlowFrames = [self.rootDir + actionCategory + "/" + videoName + "/" + Y_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
 		# combine the two lists alternatingly
@@ -121,7 +121,7 @@ class TemporalNetwork(object):
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
 		self.model = models.vgg16(pretrained = True)
 		self.__copyFirstLayer__() # modify first layer for 2*L channel motion volumes
-		self.model.features.requires_grad = False # fix the feature weights
+		# self.model.features[0:N_FIXED_LAYERS].requires_grad = False # fix the feature weights of the first few layers
 		# swap out the final layer
 		self.__swapClassifier__()
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
@@ -216,7 +216,7 @@ class TemporalNetwork(object):
 					self.trainDict[videoNames[i]] = (AverageMeter(), labels[i])
 					self.trainDict[videoNames[i]][0].update(featureVectors[i])
 
-		# torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
+		nn.utils.clip_grad_norm_(self.model.module.classifier.parameters(), max_norm=1.0) # clip gradients to avoid vanishig or exploding
 		endTime = time.time()
 		duration = endTime - startTime
 		print "Epoch %d completed in %lf seconds" % (self.epoch, duration)
@@ -233,8 +233,8 @@ class TemporalNetwork(object):
 		with tch.no_grad():
 			for iBatch, (data, labels, videoNames) in enumerate(self.testLoader):
 				if self.gpu:
-					labelVar = ag.Variable(labels, volatile = True).cuda(async = True)
-					ip = ag.Variable(data, volatile = True).cuda(async = True)
+					labelVar = ag.Variable(labels).cuda(async = True)
+					ip = ag.Variable(data).cuda(async = True)
 				else:
 					labelVar = ag.Variable(labels)
 					ip = ag.Variable(data)
@@ -308,19 +308,19 @@ class TemporalNetwork(object):
 			self.save() # save state
 			savePerformance(precision, loss.data.item(), TEMPORAL_PERFORMANCE_LOC) # save epoch performance
 			# save video level descriptors
-			saveVideoDescriptors(self.trainDict, TEMPORAL_TRAIN_CSV_LOC)
-			saveVideoDescriptors(self.testDict, TEMPORAL_TEST_CSV_LOC)
+			saveVideoDescriptors(self.trainDict, TEMPORAL_TRAIN_CSV_LOC, self.gpu)
+			saveVideoDescriptors(self.testDict, TEMPORAL_TEST_CSV_LOC, self.gpu)
 
 
 def main():
 	imageTransforms = getTransforms()
-	trainDataset = TemporalDataset(VIDEOLIST_TRAIN, FLOW_DATA_DIR, imageTransforms, flowSampleSize = 10, actionLabelLoc = ACTIONLABEL_FILE)
-	trainDataLoader = getDataLoader(trainDataset, batchSize = 5)
+	trainDataset = TemporalDataset(VIDEOLIST_TRAIN, FLOW_DATA_DIR, imageTransforms, flowSampleSize = VIDEO_INPUT_FLOW_COUNT, actionLabelLoc = ACTIONLABEL_FILE)
+	trainDataLoader = getDataLoader(trainDataset, batchSize = TEMPORAL_BATCH_SIZE)
 	# the same image transforms for the test data as well
-	testDataset = TemporalDataset(VIDEOLIST_TEST, FLOW_DATA_DIR, imageTransforms, flowSampleSize = 10, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
-	testDataLoader = getDataLoader(testDataset, batchSize = 2)
+	testDataset = TemporalDataset(VIDEOLIST_TEST, FLOW_DATA_DIR, imageTransforms, flowSampleSize = VIDEO_INPUT_FLOW_COUNT, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
+	testDataLoader = getDataLoader(testDataset, batchSize = TEMPORAL_BATCH_SIZE)
 	gpu = tch.cuda.is_available()
-	net = TemporalNetwork(NACTION_CLASSES, VIDEO_INPUT_FLOW_COUNT, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, VIDEO_DESCRIPTOR_DIM, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
+	net = TemporalNetwork(NACTION_CLASSES, VIDEO_INPUT_FLOW_COUNT, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, VIDEO_DESCRIPTOR_DIM, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = True)
 	net.execute()
 
 

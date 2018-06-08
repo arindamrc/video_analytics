@@ -60,7 +60,7 @@ def extractEveryNthFrame(videoLoc, N):
 	while(cap.isOpened()):
 		ret, frame = cap.read()
 		if not ret:
-			print "capture done"
+			#print "capture done"
 			break
 		if frameIdx % N == 0:
 			frameList.append(frame)
@@ -122,7 +122,7 @@ def convertVideosToFrames(rootDir, saveDir, videoListLoc, sampleRate = VIDEO_FRA
 
 
 
-def getDataLoader(dataset, batchSize = TRAIN_BATCH_SIZE, nWorkers = NWORKERS_LOADER, shuffle = SHUFFLE_LOADER):
+def getDataLoader(dataset, batchSize = TEMPORAL_BATCH_SIZE, nWorkers = NWORKERS_LOADER, shuffle = SHUFFLE_LOADER):
 	"""
 	Return a torch dataloader with the given parameters.
 	"""
@@ -134,7 +134,7 @@ def getDataLoader(dataset, batchSize = TRAIN_BATCH_SIZE, nWorkers = NWORKERS_LOA
 
 
 
-def getTransforms(cropSize = CROP_SIZE_TF, hortizontalFlip = HORIZONTAL_FLIP_TF, normMeans = NORM_MEANS_TF, normStds = NORM_STDS_TF):
+def getTransforms(cropSize = CROP_SIZE_TF, hortizontalFlip = HORIZONTAL_FLIP_TF, normMeans = NORM_MEANS_TF, normStds = NORM_STDS_TF, jitter = COLOR_JITTERS):
 	"""
 	Get image transformations based of provided parameters.
 	"""
@@ -143,6 +143,8 @@ def getTransforms(cropSize = CROP_SIZE_TF, hortizontalFlip = HORIZONTAL_FLIP_TF,
 		imgTrans.append(transforms.RandomCrop(224))
 	if hortizontalFlip:
 		imgTrans.append(transforms.RandomHorizontalFlip())
+	if jitter:
+		imgTrans.append(transforms.ColorJitter(*jitter))
 	imgTrans.append(transforms.ToTensor())
 	if normMeans and normStds:
 		imgTrans.append(transforms.Normalize(mean = normMeans, std = normStds))
@@ -169,7 +171,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def saveVideoDescriptors(videoDescDict, csvLoc):
+def saveVideoDescriptors(videoDescDict, csvLoc, gpu = False):
 	"""
 	Write out the video descriptors to disk for later use.
 	Format is <video-name>,<label>,<4096 dim comma separated descriptor>.
@@ -186,7 +188,10 @@ def saveVideoDescriptors(videoDescDict, csvLoc):
 			# the first and second columns contain the video name and label respectively
 			csvFile.write(videoName + "," + str(videoLabel) + ",") 
 			videoDesc = videoDescDict[videoName][0].avg
-			videoDesc = videoDesc.data.numpy().astype(float)
+			if gpu:
+				videoDesc = videoDesc.cpu().data.numpy().astype(float)
+			else:
+				videoDesc = videoDesc.data.numpy().astype(float)
 			writer.writerow(videoDesc) 
 
 

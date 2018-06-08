@@ -41,7 +41,7 @@ class SpatialDataset(Dataset):
 		self.frameSampleSize = frameSampleSize
 		self.mode = mode
 		with open(videoListLoc, "r") as videoListFile:
-			self.videoList = [line for line in videoListFile][:20]
+			self.videoList = [line for line in videoListFile]
 		if actionLabelLoc is None:
 			raise ValueError("Action label dictionary required!")
 		with open(actionLabelLoc, "r") as actionLabelFile:
@@ -108,7 +108,7 @@ class SpatialNetwork(object):
 			print "No GPU available!"
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
 		self.model = models.vgg16(pretrained = True)
-		self.model.features.require_grad = False # fix the feature weights
+		self.model.features[0:N_FIXED_LAYERS].require_grad = False # fix the feature weights of the first few layers
 		# swap out the final layer
 		self.__swapClassifier__()
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function
@@ -163,8 +163,8 @@ class SpatialNetwork(object):
 		featureVectors = None
 		for iBatch, (data, labels, videoNames) in enumerate(self.trainLoader):
 			if self.gpu:
-				labelVar = ag.Variable(labels.cuda(async = True))
-				ip = ag.Variable(data.cuda(async = True))
+				labelVar = ag.Variable(labels).cuda(async = True)
+				ip = ag.Variable(data).cuda(async = True)
 			else:
 				labelVar = ag.Variable(labels)
 				ip = ag.Variable(data)
@@ -187,7 +187,7 @@ class SpatialNetwork(object):
 					self.trainDict[videoNames[i]] = (AverageMeter(), labels[i])
 					self.trainDict[videoNames[i]][0].update(featureVectors[i])
 
-		# torch.nn.utils.clip_grad_norm_(self.model.classifier.parameters(), max_norm=1.0)
+		nn.utils.clip_grad_norm_(self.model.module.parameters(), max_norm=1.0) # avoid vanishing or exploding gradients
 		endTime = time.time()
 		duration = endTime - startTime
 		print "Epoch %d completed in %lf seconds" % (self.epoch, duration)
@@ -279,22 +279,22 @@ class SpatialNetwork(object):
 			self.save() # save state
 			savePerformance(precision, loss.data.item(), SPATIAL_PERFORMANCE_LOC) # save epoch performance
 			# save video level descriptors
-			saveVideoDescriptors(self.trainDict, SPATIAL_TRAIN_CSV_LOC)
-			saveVideoDescriptors(self.testDict, SPATIAL_TEST_CSV_LOC)
+			saveVideoDescriptors(self.trainDict, SPATIAL_TRAIN_CSV_LOC, self.gpu)
+			saveVideoDescriptors(self.testDict, SPATIAL_TEST_CSV_LOC, self.gpu)
 
 
 def main():
 	if CONVERT:
-		convertVideosToFrames(DATA_DIR, FRAMES_DIR_TRAIN, VIDEOLIST_TRAIN)
+		#convertVideosToFrames(DATA_DIR, FRAMES_DIR_TRAIN, VIDEOLIST_TRAIN)
 		convertVideosToFrames(DATA_DIR, FRAMES_DIR_TEST, VIDEOLIST_TEST, mode = "test")
 	imageTransforms = getTransforms()
 	trainDataset = SpatialDataset(VIDEOLIST_TRAIN, FRAMES_DIR_TRAIN, imageTransforms, frameSampleSize = 2, actionLabelLoc = ACTIONLABEL_FILE)
-	trainDataLoader = getDataLoader(trainDataset, batchSize = 5)
+	trainDataLoader = getDataLoader(trainDataset, batchSize = SPATIAL_BATCH_SIZE)
 	# the same image transforms for the test data as well
 	testDataset = SpatialDataset(VIDEOLIST_TEST, FRAMES_DIR_TEST, imageTransforms, mode = "test", actionLabelLoc = ACTIONLABEL_FILE)
-	testDataLoader = getDataLoader(testDataset, batchSize = 2)
+	testDataLoader = getDataLoader(testDataset, batchSize = SPATIAL_BATCH_SIZE)
 	gpu = tch.cuda.is_available()
-	net = SpatialNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, VIDEO_DESCRIPTOR_DIM, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = False)
+	net = SpatialNetwork(NACTION_CLASSES, NEPOCHS, INITIAL_LR, MOMENTUM_VAL, VIDEO_DESCRIPTOR_DIM, trainDataLoader, testDataLoader, MILESTONES_LR, CHECKPOINT_DIR, gpu = True)
 	net.execute()
 
 
