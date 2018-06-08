@@ -76,7 +76,7 @@ class TemporalDataset(Dataset):
 		flowDir = self.rootDir + actionCategory + "/" + videoName + "/"
 		# get the number of frames in the folder
 		nFlows = len([fName for fName in os.listdir(flowDir)]) / 2 # there x and y flows
-		iFlowFrame = random.randint(1, nFlows - self.flowSampleSize - 1) # load a random flow frame
+		iFlowFrame = random.randint(1, nFlows - self.flowSampleSize) # load a random flow frame
 		xFlowFrames = [self.rootDir + actionCategory + "/" + videoName + "/" + X_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
 		yFlowFrames = [self.rootDir + actionCategory + "/" + videoName + "/" + Y_PREFIX_FLOW + str(idx).zfill(4) + FRAME_EXTN for idx in range(iFlowFrame, iFlowFrame + self.flowSampleSize)]
 		# combine the two lists alternatingly
@@ -121,7 +121,7 @@ class TemporalNetwork(object):
 		# get a VGG16 model pretrained with Imagenet; load it onto the graphic memory
 		self.model = models.vgg16(pretrained = True)
 		self.__copyFirstLayer__() # modify first layer for 2*L channel motion volumes
-		self.model.features[0:N_FIXED_LAYERS].requires_grad = False # fix the feature weights of the first few layers
+		# self.model.features[0:N_FIXED_LAYERS].requires_grad = False # fix the feature weights of the first few layers
 		# swap out the final layer
 		self.__swapClassifier__()
 		self.criterion = nn.CrossEntropyLoss().cuda() if self.gpu else nn.CrossEntropyLoss() # set the loss function

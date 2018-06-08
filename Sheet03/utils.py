@@ -134,7 +134,7 @@ def getDataLoader(dataset, batchSize = TEMPORAL_BATCH_SIZE, nWorkers = NWORKERS_
 
 
 
-def getTransforms(cropSize = CROP_SIZE_TF, hortizontalFlip = HORIZONTAL_FLIP_TF, normMeans = NORM_MEANS_TF, normStds = NORM_STDS_TF):
+def getTransforms(cropSize = CROP_SIZE_TF, hortizontalFlip = HORIZONTAL_FLIP_TF, normMeans = NORM_MEANS_TF, normStds = NORM_STDS_TF, jitter = COLOR_JITTERS):
 	"""
 	Get image transformations based of provided parameters.
 	"""
@@ -143,6 +143,8 @@ def getTransforms(cropSize = CROP_SIZE_TF, hortizontalFlip = HORIZONTAL_FLIP_TF,
 		imgTrans.append(transforms.RandomCrop(224))
 	if hortizontalFlip:
 		imgTrans.append(transforms.RandomHorizontalFlip())
+	if jitter:
+		imgTrans.append(transforms.ColorJitter(*jitter))
 	imgTrans.append(transforms.ToTensor())
 	if normMeans and normStds:
 		imgTrans.append(transforms.Normalize(mean = normMeans, std = normStds))
