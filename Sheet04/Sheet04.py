@@ -224,6 +224,7 @@ class BaumWelch(object):
 		# initialize the temporary variables
 		self.gamma = []
 		self.eta = []
+		self.__temporaries__()
 		
 
 	def __passes__(self):
@@ -239,12 +240,14 @@ class BaumWelch(object):
 			self.beta.appendleft(beta_t)
 
 
-	def getTemporaries(self):
+	def __temporaries__(self):
 		"""
-		Returns: The temporaries gamma and eta: results of baum-welch.
+		Calculate the temporaries gamma and eta: results of baum-welch.
 		"""
 		self.__passes__() # make the forward and backward passes.
 		gamma_sum = np.zeros_like(self.alpha[0])
+		# print "self.obsCount"
+		# print self.obsCount
 		for t in range(self.obsCount):
 			gamma_t = self.alpha[t] * self.beta[t]
 			self.gamma.append(gamma_t)
@@ -259,6 +262,13 @@ class BaumWelch(object):
 		for t in range(self.obsCount):
 			gamma_sum = fixZeros(gamma_sum)
 			self.gamma[t] /= gamma_sum
+		return self.gamma, self.eta
+
+
+	def getTemporaries(self):
+		"""
+		Return the calculated temporaries.
+		"""
 		return self.gamma, self.eta
 
 
@@ -327,12 +337,12 @@ class LearnGaussians(object):
 			observations = np.load(self.seqFeatures[nSeq]) # a sequence of T observations
 			bw = self.bwList[nSeq] # baum-welch
 			gamma, eta = bw.getTemporaries() # each a sequence of T elements
-			print "len(gamma)"
-			print len(gamma)
-			print "len(eta)"
-			print len(eta)
-			print "len(observations)"
-			print len(observations)
+			# print "len(gamma)"
+			# print len(gamma)
+			# print "len(eta)"
+			# print len(eta)
+			# print "len(observations)"
+			# print len(observations)
 			for t in range(len(eta)):
 				observation = observations[t, np.newaxis].T
 				# print "observation.shape"
@@ -347,7 +357,7 @@ class LearnGaussians(object):
 					sigmas[:,:,i] += gamma[t][i] * var
 		for i in range(self.stateCount):
 			divisor = fixZeros(sumGamma[i])
-			sigmas[:,:,i] / divisior
+			sigmas[:,:,i] = sigmas[:,:,i] / divisor
 		return sigmas
 
 
@@ -379,11 +389,17 @@ class LearnGaussians(object):
 			pObservations = np.zeros((len(mus), len(observations)))
 			for nGaussian in range(len(mus)):
 				mu = mus[nGaussian]
-				sigma = sigmas[nGaussian]
+				sigma = sigmas[:,:,nGaussian]
+				if abs(np.linalg.det(sigma)) == 0:
+					singular = True
 				for t in range(len(observations)):
 					observation = observations[t]
-					pObservations[nGaussian, t] = pstats.multivariate_normal.pdf(observation, mean = mu, cov = np.square(sigma))
+					if singular:
+						pObservations[nGaussian, t] = 0.0
+					else:
+						pObservations[nGaussian, t] = stats.multivariate_normal.pdf(observation, mean = mu, cov = np.square(sigma))
 			self.bwList[nSeq].pObservations = pObservations
+			print pObservations
 		return
 
 
