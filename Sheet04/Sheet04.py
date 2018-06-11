@@ -35,13 +35,22 @@ def fixZeros(arr):
 	arr[abs(arr) < EPSILON] = 1.0
 	return arr
 
+def sumNormalize(arr):
+	"""
+	Normalize the array based on sum.
+	"""
+	s = np.sum(arr)
+	if s == 0.0:
+		s = 1.0
+	return arr / s
 
-def normalizePerRow(arr2d):
+def normalizePerRow(arr2d, checkZeros = True):
 	"""
 	Ensures that each row sums to 1.0.
 	"""
 	rowSums = arr2d.sum(axis=1)
-	rowSums = fixZeros(rowSums) # prevent division by zero
+	if checkZeros:
+		rowSums = fixZeros(rowSums) # prevent division by zero
 	normalized = arr2d / rowSums[:, np.newaxis]
 	return normalized
 
@@ -91,51 +100,6 @@ def getSequenceFiles(activity, sequenceLoc = SEQUENCE_LOC):
 	return sortAlphaNumerically(seqFeatures), sortAlphaNumerically(seqInits)
 
 
-def getTransitionProbs2(initStates, stateIndices):
-	"""
-	Constructs the initial state transition probability matrix based on the supplied initial states.
-	"""
-	states, stateCounts = np.unique(initStates, return_counts = True) # state indices
-	# compensate for missing states
-	print "states before"
-	print states
-	states = np.pad(states, pad_width = (0, len(stateIndices) - len(states)), mode = "constant", constant_values = -1)
-	print "states after"
-	print states
-	print "stateIndices"
-	print stateIndices
-	print "states counts before"
-	print stateCounts
-	mismatches = np.where(states != stateIndices)
-	print "mismatches"
-	print mismatches[0]
-	print "len(mismatches[0])"
-	print len(mismatches[0])
-	if len(mismatches) > 0:
-		stateCounts = np.insert(stateCounts, mismatches[0], 0)
-	print "states counts after"
-	print stateCounts
-	stateIndexDict = {stateIndices[i] : i for i in range(len(stateIndices))}
-	nStates = len(stateIndices) # state count = gaussian component count
-	pTransitions = np.zeros((nStates, nStates), dtype = float) # initialize the N x N state transition matrix.
-	# first, the self transitions
-	for i in range(nStates):
-		if stateCounts[i] == 0:
-			pTransitions[i,i] = 0.0
-		else:
-			pTransitions[i,i] = (stateCounts[i] - 1) / len(initStates) 
-	for i in range(len(initStates)):
-		nxtStateCounts = {st:0 for st in stateIndices if st != initStates[i]}
-		for j in range(i, len(initStates)): # start from the current state because HMM is left to right ordered
-			if initStates[j] == initStates[i]:
-				continue # skip for self transitions
-			nxtStateCounts[initStates[j]] += 1
-		for st, count in nxtStateCounts.iteritems():
-			pTransitions[i, stateIndexDict[st]] = count / len(initStates)
-	pTransitions = normalizePerRow(pTransitions) # transition probabilities from a state should sum to 1.0
-	return pTransitions
-
-
 def getTransitionProbs(initStates, stateIndices):
 	"""
 	Constructs the initial state transition probability matrix based on the supplied initial states.
@@ -167,16 +131,17 @@ def getObservationProbs(initStates, stateIndices):
 	"""
 	Constructs the intial observation probability matrix based on supplied initial states and the sequence of observations.
 	"""
-	states, stateCounts = np.unique(initStates, return_counts = True) # state indices
-	# compensate for missing states
-	mismatches = np.where(states != stateIndices)
-	for i in mismatches:
-		np.insert(stateCounts, i, 0)
-	pObservations = np.zeros((len(stateIndices), len(initStates)), dtype = float) # initialize the N x T matrix
-	stateIndexDict = {stateIndices[i] : i for i in range(len(stateIndices))}
-	for i in range(len(initStates)):
-		st = initStates[i]
-		pObservations[stateIndexDict[st], i] = 1.0
+	# states, stateCounts = np.unique(initStates, return_counts = True) # state indices
+	# # compensate for missing states
+	# mismatches = np.where(states != stateIndices)
+	# for i in mismatches:
+	# 	np.insert(stateCounts, i, 0)
+	# pObservations = np.zeros((len(stateIndices), len(initStates)), dtype = float) # initialize the N x T matrix
+	# stateIndexDict = {stateIndices[i] : i for i in range(len(stateIndices))}
+	# for i in range(len(initStates)):
+	# 	st = initStates[i]
+	# 	pObservations[stateIndexDict[st], i] = 1.0
+	pObservations = np.ones((len(stateIndices), len(initStates)), dtype = float) # initialize the N x T matrix
 	pObservations = normalizePerRow(pObservations) # normalize observation probabilities per state
 	return pObservations
 
@@ -234,10 +199,19 @@ class BaumWelch(object):
 		self.alpha.append(alpha_t)
 		self.beta.append(beta_t)
 		for t in range(self.obsCount - 1):
-			alpha_t = self.pObservations[:, t+1, np.newaxis] * np.sum(alpha_t * self.pTransitions, axis = 0, keepdims = True).T # forward pass
-			beta_t = np.sum(beta_t * self.pTransitions.T * self.pObservations[:, (self.obsCount - 1 - t), np.newaxis], axis = 0, keepdims = True).T # backward pass
+			for i in range(self.stateCount):
+				sumAlpha = 0
+				sumBeta = 0
+				for j in range(self.stateCount):
+					sumAlpha += alpha_t[j] * self.pTransitions[j,i]
+					sumBeta += beta_t[j] * self.pTransitions[i,j] * self.pObservations[j,(self.obsCount - 1 - t)]
+				alpha_t[i] = self.pObservations[i, t+1] * sumAlpha
+				beta_t[i] = sumBeta
+			alpha_t = sumNormalize(alpha_t)
+			beta_t = sumNormalize(beta_t)
 			self.alpha.append(alpha_t)
 			self.beta.appendleft(beta_t)
+		return
 
 
 	def __temporaries__(self):
@@ -246,12 +220,14 @@ class BaumWelch(object):
 		"""
 		self.__passes__() # make the forward and backward passes.
 		gamma_sum = np.zeros_like(self.alpha[0])
-		# print "self.obsCount"
-		# print self.obsCount
 		for t in range(self.obsCount):
-			gamma_t = self.alpha[t] * self.beta[t]
+			gamma_t = np.zeros((self.stateCount, 1))
+			divisor = np.sum(self.alpha[t] * self.beta[t], axis = 0)[0] # single element array
+			if abs(divisor) < EPSILON:
+				divisor = 1.0
+			for i in range(self.stateCount):
+				gamma_t[i] = (self.alpha[t][i] * self.beta[t][i]) / divisor
 			self.gamma.append(gamma_t)
-			gamma_sum += gamma_t
 		for t in range(self.obsCount - 1):
 			beta_t = fixZeros(self.beta[t])
 			eta_t = np.zeros((self.stateCount, self.stateCount), dtype = float)
@@ -259,10 +235,7 @@ class BaumWelch(object):
 				for j in range(self.stateCount):
 					eta_t[i,j] = self.gamma[t][i] * self.pTransitions[i,j] * self.pObservations[j, t+1] * self.beta[t+1][j] / beta_t[i]
 			self.eta.append(eta_t)
-		for t in range(self.obsCount):
-			gamma_sum = fixZeros(gamma_sum)
-			self.gamma[t] /= gamma_sum
-		return self.gamma, self.eta
+		return
 
 
 	def getTemporaries(self):
@@ -296,68 +269,60 @@ class LearnGaussians(object):
 		"""
 		i = 0
 		observations = None
+		self.sequences = []
 		for obsFile, initFile in zip(self.seqFeatures, self.initFiles):
 			observations = np.load(obsFile)
+			self.sequences.append(observations)
 			initStates = np.ravel(np.load(initFile))
-			# print initFile
-			# print initStates
 			pTransitions = getTransitionProbs(initStates, self.stateIndices)
 			pObservations = getObservationProbs(initStates, self.stateIndices)
 			self.pStates = getStateProbs(initStates, self.stateIndices)
 			bw = BaumWelch(self.subActivity + str(i), observations, pTransitions, pObservations, self.pStates)
 			self.bwList.append(bw)
 			i += 1
-		self.dim = observations.shape[1]
+		self.dim = self.sequences[0].shape[1]
 
 
 	def __mu__(self):
 		"""
 		Get the list of means of all Gaussians.
 		"""
-		sumGamma = None
-		sumNumerator = None
-		for nSeq in range(len(self.seqFeatures)):
-			observations = np.load(self.seqFeatures[nSeq]) # a sequence of T observations
-			bw = self.bwList[nSeq] # baum-welch
-			gamma, eta = bw.getTemporaries() # each a sequence of T elements
-			for t in range(len(eta)):
-				sumGamma = gamma[t] if sumGamma is None else sumGamma + gamma[t]
-				sumNumerator = gamma[t] * observations[t] if sumNumerator is None else sumNumerator + gamma[t] * observations[t]
-		sumGamma = fixZeros(sumGamma)
-		return sumNumerator / sumGamma
+		mus = []
+		for i in range(self.stateCount):
+			mu = np.zeros(self.dim, dtype = float)
+			sumGamma = 0
+			for nSeq in range(len(self.seqFeatures)):
+				observations = self.sequences[nSeq] # a sequence of T observations
+				gamma, _ = self.bwList[nSeq].getTemporaries()
+				for t in range(len(gamma)):
+					observation_t = observations[t].reshape(self.dim)
+					mu += gamma[t][i] * observation_t
+					sumGamma += gamma[t][i]
+			sumGamma = 1.0 if abs(sumGamma) < EPSILON else sumGamma
+			mu = mu / sumGamma
+			mus.append(mu)
+		return mus
 
 
-	def __sigma__(self, mu):
+	def __sigma__(self, mus):
 		"""
 		Get the list standard deviation of the gaussians.
 		"""
-		sumGamma = np.zeros((self.stateCount, 1), dtype = float)
-		sigmas = np.zeros((self.dim, self.dim, self.stateCount), dtype = float)
-		for nSeq in range(len(self.seqFeatures)):
-			observations = np.load(self.seqFeatures[nSeq]) # a sequence of T observations
-			bw = self.bwList[nSeq] # baum-welch
-			gamma, eta = bw.getTemporaries() # each a sequence of T elements
-			# print "len(gamma)"
-			# print len(gamma)
-			# print "len(eta)"
-			# print len(eta)
-			# print "len(observations)"
-			# print len(observations)
-			for t in range(len(eta)):
-				observation = observations[t, np.newaxis].T
-				# print "observation.shape"
-				# print observation.shape
-				sumGamma += gamma[t]
-				for i in range(self.stateCount):
-					# print "mu[i].shape"
-					# print mu[i].shape
-					var = np.matmul((observation - mu[i]),(observation - mu[i]).T)
-					# print "var.shape"
-					# print var.shape
-					sigmas[:,:,i] += gamma[t][i] * var
+		sigmas = []
 		for i in range(self.stateCount):
-			divisor = fixZeros(sumGamma[i])
-			sigmas[:,:,i] = sigmas[:,:,i] / divisor
+			sigma = np.zeros((self.dim, self.dim), dtype = float)
+			sumGamma = 0
+			for nSeq in range(len(self.seqFeatures)):
+				observations = self.sequences[nSeq] # a sequence of T observations
+				gamma, _ = self.bwList[nSeq].getTemporaries()
+				for t in range(len(gamma)):
+					observation_t = observations[t].reshape(self.dim)
+					diff = (observation_t - mus[i]).reshape(self.dim, 1)
+					sigma += gamma[t][i] * diff * diff.T
+					sumGamma += gamma[t][i]
+			sumGamma = 1.0 if abs(sumGamma) < EPSILON else sumGamma
+			sigma = sigma / sumGamma
+			sigmas.append(sigma)
 		return sigmas
 
 
@@ -365,16 +330,18 @@ class LearnGaussians(object):
 		"""
 		Update the transition probabilities for the baum-welch algorithm.
 		"""
-		sumGamma = None
-		sumEta = None
-		for nSeq in range(len(self.seqFeatures)):
-			observations = np.load(self.seqFeatures[nSeq]) # a sequence of T observations
-			bw = self.bwList[nSeq] # baum-welch
-			gamma, eta = bw.getTemporaries() # each a sequence of T elements
-			for t in range(len(eta)):
-				sumGamma = gamma[t] if sumGamma is None else sumGamma + gamma[t]
-				sumEta = eta[t] if sumEta is None else sumEta + eta[t]
-		pTransitions = sumEta / sumGamma
+		pTransitions = np.zeros((self.stateCount, self.stateCount), dtype = float)
+		for i in range(self.stateCount):
+			sumGamma = 0
+			for j in range(self.stateCount):
+				for nSeq in range(len(self.seqFeatures)):
+					gamma, eta = self.bwList[nSeq].getTemporaries()
+					for t in range(len(eta)):
+						pTransitions[i,j] += eta[t][i,j]
+						sumGamma += gamma[t][i]
+		print pTransitions
+		pTransitions = normalizePerRow(pTransitions, checkZeros = False)
+		print pTransitions
 		for bw in self.bwList:
 			bw.pTransitions = pTransitions
 		return
@@ -385,21 +352,22 @@ class LearnGaussians(object):
 		Update the observation probabilities for the baum-welch algorithm.
 		"""
 		for nSeq in range(len(self.seqFeatures)):
-			observations = np.load(self.seqFeatures[nSeq]) # a sequence of T observations
-			pObservations = np.zeros((len(mus), len(observations)))
-			for nGaussian in range(len(mus)):
-				mu = mus[nGaussian]
-				sigma = sigmas[:,:,nGaussian]
+			observations = self.sequences[nSeq] # a sequence of T observations
+			pObservations = np.zeros((self.stateCount, len(observations)))
+			for j in range(self.stateCount):
+				mu = mus[j]
+				sigma = sigmas[j]
+				singular = False
 				if abs(np.linalg.det(sigma)) == 0:
 					singular = True
 				for t in range(len(observations)):
-					observation = observations[t]
+					observation_t = observations[t]
 					if singular:
-						pObservations[nGaussian, t] = 0.0
+						pObservations[j, t] = 0.0
 					else:
-						pObservations[nGaussian, t] = stats.multivariate_normal.pdf(observation, mean = mu, cov = np.square(sigma))
+						pObservations[j, t] = stats.multivariate_normal.pdf(observation_t, mean = mu, cov = np.square(sigma))
+			pObservations = normalizePerRow(pObservations, checkZeros = False)
 			self.bwList[nSeq].pObservations = pObservations
-			print pObservations
 		return
 
 
