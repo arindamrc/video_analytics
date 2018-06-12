@@ -8,6 +8,9 @@ import sys
 
 GMM_DIM = 64
 EPSILON = 0.000001
+ITERATIONS = 5
+SLF_PROB = 0.9
+NXT_PROB = 0.1
 
 
 HMM_DEF_DICT = "/home/arc/VA_Assignments/Sheet04/exc1/hmm_definition.dict"
@@ -32,7 +35,7 @@ def fixZeros(arr):
 	A fix to prevent division by zero.
 	"""
 	arr = arr.copy()
-	arr[abs(arr) < EPSILON] = 1.0
+	arr[arr == 0.0] = 1.0
 	return arr
 
 def sumNormalize(arr):
@@ -100,7 +103,7 @@ def getSequenceFiles(activity, sequenceLoc = SEQUENCE_LOC):
 	return sortAlphaNumerically(seqFeatures), sortAlphaNumerically(seqInits)
 
 
-def getTransitionProbs(initStates, stateIndices):
+def getTransitionProbs(initStates, stateIndices, selfProb, nxtProb):
 	"""
 	Constructs the initial state transition probability matrix based on the supplied initial states.
 	"""
@@ -109,20 +112,15 @@ def getTransitionProbs(initStates, stateIndices):
 	pTransitions = np.zeros((nStates, nStates), dtype = float) # initialize the N x N state transition matrix.
 	# first, the self transitions
 	for i in range(nStates):
-		state = stateIndices[i]
-		if state in states:
-			pTransitions[i,i] = (stateCounts[i] - 1) / len(initStates) 
-		else:
-			pTransitions[i,i] = 0.0
-	# Now the transition to other states; Assumption: states always appear in order
-	for i in range(nStates):
-		state = stateIndices[i]
-		if state in states:
-			for j in range(i + 1, len(stateCounts)):
-				pTransitions[i, j] = stateCounts[j] / len(initStates)
-		else:
-			for j in range(i + 1, nStates):
-				pTransitions[i, j] = 0.0
+		for j in range(nStates):
+			if j == i:
+				prob = selfProb
+			elif j == i+1:
+				prob = nxtProb
+			else:
+				prob = 0.0
+			pTransitions[i,j] = prob
+	pTransitions = normalizePerRow(pTransitions)
 	return pTransitions
 
 
@@ -131,19 +129,9 @@ def getObservationProbs(initStates, stateIndices):
 	"""
 	Constructs the intial observation probability matrix based on supplied initial states and the sequence of observations.
 	"""
-	# states, stateCounts = np.unique(initStates, return_counts = True) # state indices
-	# # compensate for missing states
-	# mismatches = np.where(states != stateIndices)
-	# for i in mismatches:
-	# 	np.insert(stateCounts, i, 0)
-	# pObservations = np.zeros((len(stateIndices), len(initStates)), dtype = float) # initialize the N x T matrix
-	# stateIndexDict = {stateIndices[i] : i for i in range(len(stateIndices))}
-	# for i in range(len(initStates)):
-	# 	st = initStates[i]
-	# 	pObservations[stateIndexDict[st], i] = 1.0
-	pObservations = np.ones((len(stateIndices), len(initStates)), dtype = float) # initialize the N x T matrix
-	pObservations = normalizePerRow(pObservations) # normalize observation probabilities per state
-	return pObservations
+	pEmissions = np.ones((len(stateIndices), len(initStates)), dtype = float) # initialize the N x T matrix
+	pEmissions = normalizePerRow(pEmissions) # normalize observation probabilities per state
+	return pEmissions
 
 
 def getStateProbs(initStates, stateIndices):
@@ -151,11 +139,7 @@ def getStateProbs(initStates, stateIndices):
 	Constructs the initial state probability matrix. This is just the state distribution.
 	"""
 	states, stateCounts = np.unique(initStates, return_counts = True) # state indices
-	pStates = np.zeros((len(stateIndices), 1), dtype = float)
-	for i in range(len(stateIndices)):
-		state = stateIndices[i]
-		if state in states:
-			pStates[i, 0] = stateCounts[i] / len(initStates)
+	pStates = sumNormalize(np.ones((len(stateIndices), 1), dtype = float))
 	return pStates
 
 
@@ -166,15 +150,15 @@ class BaumWelch(object):
 
 	observations: The sequence of observations or feature vectors O(1...T)
 	pTransitions: An N x N matrix giving the state transition probabilities. N -> no. of states.
-	pObservations: An N x T- matrix giving the observation probabilities of each of the T features at each state.
+	pEmissions: An N x T- matrix giving the observation probabilities of each of the T features at each state.
 	pStates: The probability of each state occurring. N x 1.
 	"""
-	def __init__(self, activity, observations, pTransitions, pObservations, pStates):
+	def __init__(self, activity, observations, pTransitions, pEmissions, pStates):
 		super(BaumWelch, self).__init__()
 		self.activity = activity
 		self.observations = observations
 		self.pTransitions = pTransitions
-		self.pObservations = pObservations
+		self.pEmissions = pEmissions
 		self.pStates = pStates
 		self.stateCount = len(pStates)
 		self.obsCount = observations.shape[0] # T
@@ -194,7 +178,7 @@ class BaumWelch(object):
 
 	def __passes__(self):
 		# initialize the forward and backward passes
-		alpha_t = self.pStates * self.pObservations[:, 0, np.newaxis]
+		alpha_t = self.pStates * self.pEmissions[:, 0, np.newaxis]
 		beta_t = np.ones((self.stateCount, 1), dtype = float)
 		self.alpha.append(alpha_t)
 		self.beta.append(beta_t)
@@ -204,8 +188,8 @@ class BaumWelch(object):
 				sumBeta = 0
 				for j in range(self.stateCount):
 					sumAlpha += alpha_t[j] * self.pTransitions[j,i]
-					sumBeta += beta_t[j] * self.pTransitions[i,j] * self.pObservations[j,(self.obsCount - 1 - t)]
-				alpha_t[i] = self.pObservations[i, t+1] * sumAlpha
+					sumBeta += beta_t[j] * self.pTransitions[i,j] * self.pEmissions[j,(self.obsCount - 1 - t)]
+				alpha_t[i] = self.pEmissions[i, t+1] * sumAlpha
 				beta_t[i] = sumBeta
 			alpha_t = sumNormalize(alpha_t)
 			beta_t = sumNormalize(beta_t)
@@ -233,7 +217,7 @@ class BaumWelch(object):
 			eta_t = np.zeros((self.stateCount, self.stateCount), dtype = float)
 			for i in range(self.stateCount):
 				for j in range(self.stateCount):
-					eta_t[i,j] = self.gamma[t][i] * self.pTransitions[i,j] * self.pObservations[j, t+1] * self.beta[t+1][j] / beta_t[i]
+					eta_t[i,j] = self.gamma[t][i] * self.pTransitions[i,j] * self.pEmissions[j, t+1] * self.beta[t+1][j] / beta_t[i]
 			self.eta.append(eta_t)
 		return
 
@@ -249,13 +233,14 @@ class BaumWelch(object):
 class LearnGaussians(object):
 	"""Calculates the parameters of individual Gaussians using the Baum-Welch algorithm."""
 	
-	def __init__(self, subActivity, stateIndices, seqLoc):
+	def __init__(self, activity, stateNames, stateIndices, seqLoc):
 		"""
-		Initialize with the subActivity name and the location of all it's sequences.
+		Initialize with the activity name and the location of all it's sequences.
 		"""
 		super(LearnGaussians, self).__init__()
-		self.subActivity = subActivity
-		self.seqFeatures, self.initFiles = getSequenceFiles(subActivity, seqLoc)
+		self.activity = activity
+		self.seqFeatures, self.initFiles = getSequenceFiles(activity, seqLoc)
+		self.stateNames = stateNames
 		self.stateIndices = stateIndices
 		self.stateCount = len(stateIndices)
 		self.bwList = [] # for each sequence
@@ -274,10 +259,10 @@ class LearnGaussians(object):
 			observations = np.load(obsFile)
 			self.sequences.append(observations)
 			initStates = np.ravel(np.load(initFile))
-			pTransitions = getTransitionProbs(initStates, self.stateIndices)
-			pObservations = getObservationProbs(initStates, self.stateIndices)
+			pTransitions = getTransitionProbs(initStates, self.stateIndices, SLF_PROB, NXT_PROB)
+			pEmissions = getObservationProbs(initStates, self.stateIndices)
 			self.pStates = getStateProbs(initStates, self.stateIndices)
-			bw = BaumWelch(self.subActivity + str(i), observations, pTransitions, pObservations, self.pStates)
+			bw = BaumWelch(self.activity + str(i), observations, pTransitions, pEmissions, self.pStates)
 			self.bwList.append(bw)
 			i += 1
 		self.dim = self.sequences[0].shape[1]
@@ -339,12 +324,10 @@ class LearnGaussians(object):
 					for t in range(len(eta)):
 						pTransitions[i,j] += eta[t][i,j]
 						sumGamma += gamma[t][i]
-		print pTransitions
 		pTransitions = normalizePerRow(pTransitions, checkZeros = False)
-		print pTransitions
 		for bw in self.bwList:
 			bw.pTransitions = pTransitions
-		return
+		return pTransitions
 
 
 	def __updateObservationProbs__(self, mus, sigmas):
@@ -353,7 +336,7 @@ class LearnGaussians(object):
 		"""
 		for nSeq in range(len(self.seqFeatures)):
 			observations = self.sequences[nSeq] # a sequence of T observations
-			pObservations = np.zeros((self.stateCount, len(observations)))
+			pEmissions = np.zeros((self.stateCount, len(observations)))
 			for j in range(self.stateCount):
 				mu = mus[j]
 				sigma = sigmas[j]
@@ -363,12 +346,27 @@ class LearnGaussians(object):
 				for t in range(len(observations)):
 					observation_t = observations[t]
 					if singular:
-						pObservations[j, t] = 0.0
+						pEmissions[j, t] = 0.0
 					else:
-						pObservations[j, t] = stats.multivariate_normal.pdf(observation_t, mean = mu, cov = np.square(sigma))
-			pObservations = normalizePerRow(pObservations, checkZeros = False)
-			self.bwList[nSeq].pObservations = pObservations
+						pEmissions[j, t] = stats.multivariate_normal.pdf(observation_t, mean = mu, cov = np.square(sigma))
+			pEmissions = normalizePerRow(pEmissions, checkZeros = False)
+			self.bwList[nSeq].pEmissions = pEmissions
 		return
+
+
+	def __updateStateProbabilities__(self):
+		"""
+		Update the initial state distributions.
+		"""
+		pStates = np.zeros((len(self.stateCount), 1), dtype = float)
+		for nSeq in range(len(self.seqFeatures)):
+			gamma, _ = self.bwList[nSeq].getTemporaries()
+			pStates += gamma[0]
+		pStates = pStates / len(self.seqFeatures)
+		pStates = sumNormalize(pStates)
+		for bw in self.bwList:
+			bw.pStates = pStates
+		return pStates
 
 
 	def __resetBaumWelch__(self):
@@ -380,29 +378,92 @@ class LearnGaussians(object):
 		return
 
 
-
 	def run(self):
 		"""
-		Execute the iterative learning procedure.
+		Execute the iterative HMM parameter learning procedure.
 		"""
 		mus = self.__mu__()
 		sigmas = self.__sigma__(mus)
-		self.__updateTransitionProbs__()
+		pTransitions = self.__updateTransitionProbs__()
 		self.__updateObservationProbs__(mus, sigmas)
+		pStates = self.__updateStateProbabilities__()
 		self.__resetBaumWelch__()
-		return mus, sigmas
+		return mus, sigmas, pTransitions, pStates
+
+
+############################################################################################
 
 
 
+class Viterbi(object):
+	"""
+	The Viterbi Algorithm for finding the most likely sequence of states for
+	a given sequence of observations.
+	"""
+	def __init__(self, pStates, pTransitions, pEmissions):
+		"""
+		N -> No. of states
+		T -> No. of observations / frames
+		Parameters:
+		pStates : The initial likelihood of each state. (N x 1)
+		pTransitions : The state transition probabilities. (N x N)
+		pEmissions : The observation probabilities at each state.
+		Contains log-likelihoods instead of likelihoods for numerical stability. (N x T)
+		"""
+		super(Viterbi, self).__init__()
+		self.pStates = pStates
+		self.pTransitions = pTransitions
+		self.pEmissions = pEmissions
+		self.stateCount = len(pStates) # N
+		self.obsCount = pEmissions.shape[1] # T
+		# initialize the tables
+		T1 = np.zeros((self.stateCount, self.obsCount), type = float)
+		T2 = np.zeros((self.stateCount, self.obsCount), type = float)
 
+
+	def run(self):
+		"""
+		Execute the Viterbi algorithm. Returns the sequence of most likely states.
+		"""
+		for i in range(self.stateCount):
+			T1[i,0] = self.pStates[i] * self.pEmissions[i,0]
 		
-		
+		for t in range(1, self.obsCount):
+			for i in range(self.stateCount):
+				emsn = pEmissions[i,t]
+				probs = T1[:,t-1] * self.pTransitions[:,i] * emsn
+				T1[i,t] = np.max(probs)
+				T2[i,t] = np.argmax(probs)
+
+		z = deque()
+		z.append(np.argmax(T1[:,self.obsCount-1]))
+		for t in range(2, self.obsCount-1, -1):
+			z.appendleft(T2[z[t],t])
+		return z
+
+
+
+
+
+
+
+
+############################################################################################
+
 
 def main():
 	activities = getActivities(HMM_DEF_DICT)
-	stateNames, stateIndices = getActivityStates(activities)
-	lg = LearnGaussians(activities[0], stateIndices[0], SEQUENCE_LOC)
-	lg.run()
+	stateNamesList, stateIndicesList = getActivityStates(activities)
+	lgList = []
+	for activity, stateNames, stateIndices in zip(activities, stateNamesList, stateIndicesList):
+		lgList.append(LearnGaussians(activity, stateNames, stateIndices, SEQUENCE_LOC))
+	for it in range(ITERATIONS):
+		activityDict_means = {}
+		activityDict_covs = {}
+		for lg in lgList:
+			mus, sigmas = lg.run()
+			activityDict_means[activity] = mus
+			activityDict_covs[activity] = sigmas
 	
 
 
