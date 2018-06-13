@@ -18,6 +18,18 @@ HMM_DEF_VECT = "/home/arc/VA_Assignments/Sheet04/exc1/hmm_definition.vector"
 HMM_ST_DEF_VECT = "/home/arc/VA_Assignments/Sheet04/exc1/hmm_state_definition.vector"
 ST_INIT_SUFFIX = "initStates.npy"
 SEQUENCE_LOC = "/home/arc/VA_Assignments/Sheet04/exc2/train_samples/"
+GRAMMAR_LOC_1 = "/home/arc/VA_Assignments/Sheet04/exc1/test1.grammar"
+GRAMMAR_LOC_2 = "/home/arc/VA_Assignments/Sheet04/exc1/test2.grammar"
+GRAMMAR_LOC_3 = "/home/arc/VA_Assignments/Sheet04/exc1/test3.grammar"
+TEST_DATA_1 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_cereals.npy"
+TEST_DATA_2 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_coffee.npy"
+TEST_DATA_3 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_milk.npy"
+GT_1 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_cereals.gt"
+GT_2 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_coffee.gt"
+GT_3 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_milk.gt"
+GMM_MEANS = "/home/arc/VA_Assignments/Sheet04/exc1/GMM_mean.matrix"
+GMM_VARS = "/home/arc/VA_Assignments/Sheet04/exc1/GMM_var.matrix"
+
 
 
 # Some utilities
@@ -75,11 +87,11 @@ def getActivityStates(activities, actDefLoc = HMM_DEF_VECT, subActLoc = HMM_ST_D
 	"""
 	Get a list of sub-activities indexed by activity.
 	"""
-	stateNames = []
-	stateIndices = []
+	stateNames = {}
+	stateIndices = {}
 	stateIndex = 0
 	with open(actDefLoc, "r") as actDefFile, open(subActLoc, "r") as subActDefFile:
-		for activity in range(len(activities)):
+		for activity in activities:
 			stateCount = int(actDefFile.readline().strip())
 			stateNameList = []
 			stateIndexList = []
@@ -87,8 +99,8 @@ def getActivityStates(activities, actDefLoc = HMM_DEF_VECT, subActLoc = HMM_ST_D
 				stateNameList.append(subActDefFile.readline().strip())
 				stateIndexList.append(stateIndex)
 				stateIndex += 1
-			stateNames.append(stateNameList)
-			stateIndices.append(stateIndexList)
+			stateNames[activity] = stateNameList
+			stateIndices[activity] = stateIndexList
 	return stateNames, stateIndices
 
 
@@ -103,11 +115,10 @@ def getSequenceFiles(activity, sequenceLoc = SEQUENCE_LOC):
 	return sortAlphaNumerically(seqFeatures), sortAlphaNumerically(seqInits)
 
 
-def getTransitionProbs(initStates, stateIndices, selfProb, nxtProb):
+def getTransitionProbs(stateIndices, selfProb, nxtProb):
 	"""
 	Constructs the initial state transition probability matrix based on the supplied initial states.
 	"""
-	states, stateCounts = np.unique(initStates, return_counts = True) # state indices
 	nStates = len(stateIndices)
 	pTransitions = np.zeros((nStates, nStates), dtype = float) # initialize the N x N state transition matrix.
 	# first, the self transitions
@@ -125,23 +136,140 @@ def getTransitionProbs(initStates, stateIndices, selfProb, nxtProb):
 
 
 
-def getObservationProbs(initStates, stateIndices):
+def getEmissionProbs(stateIndices, obsCount):
 	"""
 	Constructs the intial observation probability matrix based on supplied initial states and the sequence of observations.
 	"""
-	pEmissions = np.ones((len(stateIndices), len(initStates)), dtype = float) # initialize the N x T matrix
+	pEmissions = np.ones((len(stateIndices), obsCount), dtype = float) # initialize the N x T matrix
 	pEmissions = normalizePerRow(pEmissions) # normalize observation probabilities per state
 	return pEmissions
 
 
-def getStateProbs(initStates, stateIndices):
+def getStateProbs(stateIndices):
 	"""
 	Constructs the initial state probability matrix. This is just the state distribution.
 	"""
-	states, stateCounts = np.unique(initStates, return_counts = True) # state indices
 	pStates = sumNormalize(np.ones((len(stateIndices), 1), dtype = float))
 	return pStates
 
+
+def compare(stateSeq, gtLoc):
+	"""
+	Compare the state sequence with the ground truth and return mean-over-frames accuracy.
+	"""
+	correct = 0
+	with open(gtLoc, "r") as gtFile:
+		for idx in range(len(stateSeq)):
+			actual = gtFile.readline()
+			decoded = stateSeq[idx]
+			if decoded.startswith(actual):
+				correct += 1
+	MoF = correct / len(stateSeq)
+	return MoF
+
+
+def pathScore(stateSeq, pEmissions):
+	"""
+	Get the log likelihood for the given path for the given emission matrix.
+	"""
+	sumLikelihood = 0
+	for obsIdx in range(len(stateSeq)):
+		sumLikelihood += pEmissions[stateSeq[obsIdx], obsIdx]
+	return sumLikelihood
+
+
+
+
+
+#############################################################################################
+
+
+
+class GrammarContext(object):
+	"""
+	Holds information for given grammar.
+	"""
+	def __init__(self, grammarLoc, activities, stateIndicesDict, stateNamesDict):
+		super(GrammarContext, self).__init__()
+		self.grammarLoc = grammarLoc
+		self.activities = activities
+		self.stateIndicesDict = stateIndicesDict
+		self.stateNamesDict = stateNamesDict
+		self.__loadGrammar__()
+		self.__makeMappings__()
+		self.__flattenNameDict__()
+
+	def __loadGrammar__(self):
+		with open(self.grammarLoc, "r") as grammarFile:
+			self.activitySeq = grammarFile.readline().strip().split(" ")
+
+	def __makeMappings__(self):
+		self.totalStateCount = sum([len(self.stateIndicesDict[activity]) for activity in self.activitySeq])
+		self.stateIndexMapping = []
+		[self.stateIndexMapping.extend(self.stateIndicesDict[activity]) for activity in self.activitySeq]
+	
+	def __flattenNameDict__(self):
+		self.stateNameMapping = []
+		[self.stateNameMapping.extend(self.stateNamesDict[activity]) for activity in self.activities]
+
+
+	def getTransitionProbs(self, pTransitionsDict):
+		"""
+		Get the state transition probabilities for the given grammar. 
+		"""
+		pTransitions = np.zeros((self.totalStateCount, self.totalStateCount), dtype = float)
+		start = 0
+		for activity in self.activitySeq:
+			transMat = pTransitionsDict[activity]
+			transMat[-1,-1] = 0 # set the self-transition in last state to zero
+			end = start + len(self.stateIndicesDict[activity])
+			pTransitions[start:end,start:end] = transMat
+			if end < self.totalStateCount:
+				pTransitions[end-1,end] = 1.0 # set the transition between activities
+			start = end
+		return pTransitions
+
+
+	def getEmissionProbs(self, observations, meanDict, covDict):
+		"""
+		Get the emission matrix for the given grammar and observations.
+		"""
+		pEmissions = np.zeros((self.totalStateCount, len(observations)), dtype = float)
+		stateIdx = 0
+		for activity in self.activitySeq:
+			for mu, sigma in zip(meanDict[activity], covDict[activity]):
+				pEmissions[stateIdx, :] = stats.multivariate_normal.logpdf(observations, mean = mu, cov = sigma)
+				stateIdx += 1
+		return pEmissions
+
+
+	def getStateProbs(self, pStatesDict):
+		"""
+		Get the state probability matrix.
+		"""
+		pStates = np.zeros((self.totalStateCount, 1), dtype = float)
+		start = 0
+		for activity in self.activitySeq:
+			stateMat = pStatesDict[activity]
+			end = start + len(self.stateIndicesDict[activity])
+			pStates[start:end,0] = np.ravel(stateMat)
+			start = end
+		pStates = sumNormalize(pStates) # must be a probability distribution
+		return pStates
+
+
+	def decodeStateSeq(self, stateSeq):
+		"""
+		Decode the list of ste indices to state names.
+		"""
+		return [self.stateNameMapping[self.stateIndexMapping[idx]] for idx in stateSeq]
+
+
+
+	
+
+
+#############################################################################################
 
 
 class BaumWelch(object):
@@ -259,10 +387,10 @@ class LearnGaussians(object):
 			observations = np.load(obsFile)
 			self.sequences.append(observations)
 			initStates = np.ravel(np.load(initFile))
-			pTransitions = getTransitionProbs(initStates, self.stateIndices, SLF_PROB, NXT_PROB)
-			pEmissions = getObservationProbs(initStates, self.stateIndices)
-			self.pStates = getStateProbs(initStates, self.stateIndices)
-			bw = BaumWelch(self.activity + str(i), observations, pTransitions, pEmissions, self.pStates)
+			pTransitions = getTransitionProbs(self.stateIndices, SLF_PROB, NXT_PROB)
+			pEmissions = getEmissionProbs(self.stateIndices, len(initStates))
+			pStates = getStateProbs(self.stateIndices)
+			bw = BaumWelch(self.activity + str(i), observations, pTransitions, pEmissions, pStates)
 			self.bwList.append(bw)
 			i += 1
 		self.dim = self.sequences[0].shape[1]
@@ -342,13 +470,9 @@ class LearnGaussians(object):
 				sigma = sigmas[j]
 				singular = False
 				if abs(np.linalg.det(sigma)) == 0:
-					singular = True
-				for t in range(len(observations)):
-					observation_t = observations[t]
-					if singular:
-						pEmissions[j, t] = 0.0
-					else:
-						pEmissions[j, t] = stats.multivariate_normal.pdf(observation_t, mean = mu, cov = np.square(sigma))
+					pEmissions[j, :] = np.zeros((len(observations)), dtype = float) # singular sigma
+				else:
+					pEmissions[j, :] = stats.multivariate_normal.pdf(observations, mean = mu, cov = sigma)
 			pEmissions = normalizePerRow(pEmissions, checkZeros = False)
 			self.bwList[nSeq].pEmissions = pEmissions
 		return
@@ -395,77 +519,145 @@ class LearnGaussians(object):
 
 
 
-class Viterbi(object):
+def viterbi(pStates, pTransitions, pEmissions):
 	"""
-	The Viterbi Algorithm for finding the most likely sequence of states for
-	a given sequence of observations.
+	Execute the Viterbi algorithm. Returns the sequence of most likely states.
+	N -> No. of states
+	T -> No. of observations / frames
+	Parameters:
+	pStates : The initial likelihood of each state. (N x 1)
+	pTransitions : The state transition probabilities. (N x N)
+	pEmissions : The observation probabilities at each state.
+	Contains log-likelihoods instead of likelihoods for numerical stability. (N x T)
 	"""
-	def __init__(self, pStates, pTransitions, pEmissions):
-		"""
-		N -> No. of states
-		T -> No. of observations / frames
-		Parameters:
-		pStates : The initial likelihood of each state. (N x 1)
-		pTransitions : The state transition probabilities. (N x N)
-		pEmissions : The observation probabilities at each state.
-		Contains log-likelihoods instead of likelihoods for numerical stability. (N x T)
-		"""
-		super(Viterbi, self).__init__()
-		self.pStates = pStates
-		self.pTransitions = pTransitions
-		self.pEmissions = pEmissions
-		self.stateCount = len(pStates) # N
-		self.obsCount = pEmissions.shape[1] # T
-		# initialize the tables
-		T1 = np.zeros((self.stateCount, self.obsCount), type = float)
-		T2 = np.zeros((self.stateCount, self.obsCount), type = float)
+	stateCount = len(pStates) # N
+	obsCount = pEmissions.shape[1] # T
+	# initialize the tables
+	T1 = np.zeros((stateCount, obsCount), dtype = float)
+	T2 = np.zeros((stateCount, obsCount), dtype = float)
+	for i in range(stateCount):
+		T1[i,0] = pStates[i] * pEmissions[i,0]
+	
+	for t in range(1, obsCount):
+		for i in range(stateCount):
+			emsn = pEmissions[i,t] # log likelihoods
+			probs = T1[:,t-1] + np.ma.log(pTransitions[:,i]).filled(0) + emsn
+			T1[i,t] = np.max(probs)
+			T2[i,t] = np.argmax(probs)
 
-
-	def run(self):
-		"""
-		Execute the Viterbi algorithm. Returns the sequence of most likely states.
-		"""
-		for i in range(self.stateCount):
-			T1[i,0] = self.pStates[i] * self.pEmissions[i,0]
-		
-		for t in range(1, self.obsCount):
-			for i in range(self.stateCount):
-				emsn = pEmissions[i,t]
-				probs = T1[:,t-1] * self.pTransitions[:,i] * emsn
-				T1[i,t] = np.max(probs)
-				T2[i,t] = np.argmax(probs)
-
-		z = deque()
-		z.append(np.argmax(T1[:,self.obsCount-1]))
-		for t in range(2, self.obsCount-1, -1):
-			z.appendleft(T2[z[t],t])
-		return z
-
-
-
-
-
+	z = deque()
+	z.append(np.argmax(T1[:,obsCount-1]))
+	for t in range(2, obsCount-1, -1):
+		z.appendleft(T2[z[t],t])
+	return z
 
 
 
 ############################################################################################
 
 
-def main():
+def load():
 	activities = getActivities(HMM_DEF_DICT)
-	stateNamesList, stateIndicesList = getActivityStates(activities)
+	stateNamesDict, stateIndicesDict = getActivityStates(activities)
+	grm1 = GrammarContext(GRAMMAR_LOC_1, activities, stateIndicesDict, stateNamesDict) 
+	grm2 = GrammarContext(GRAMMAR_LOC_2, activities, stateIndicesDict, stateNamesDict) 
+	grm3 = GrammarContext(GRAMMAR_LOC_3, activities, stateIndicesDict, stateNamesDict)
+	grmList = [grm1, grm2, grm3]
+
+	td1 = np.load(TEST_DATA_1).T
+	td2 = np.load(TEST_DATA_2).T
+	td3 = np.load(TEST_DATA_3).T
+	tdList = [td1, td2, td3]
+
+	gtList = [GT_1, GT_2, GT_3]
+
+	return activities, stateNamesDict, stateIndicesDict, grmList, tdList, gtList
+
+
+def test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDict):
+	scoreMat = np.zeros((len(grmList), len(tdList)), dtype = float)
+	accMat = np.zeros((len(grmList), len(tdList)), dtype = float)
+	for i in range(len(grmList)):
+		pTransitions = grmList[i].getTransitionProbs(pTransitionsDict)
+		pStates = grmList[i].getStateProbs(pStatesDict)
+		for j in range(len(tdList)):
+			pEmissions = grmList[i].getEmissionProbs(tdList[j], meanDict, covDict)
+			stateIndexSeq = viterbi(pStates, pTransitions, pEmissions)
+			stateNameSeq = grmList[i].decodeStateSeq(stateIndexSeq)
+			score = pathScore(stateIndexSeq, pEmissions)
+			acc = compare(stateNameSeq, gtList[j])
+			scoreMat[i,j] = score
+			accMat[i,j] = acc
+	return scoreMat, accMat
+
+
+def q1():
+	activities, stateNamesDict, stateIndicesDict, grmList, tdList, gtList = load()
+	means = np.loadtxt(GMM_MEANS)
+	covs = np.loadtxt(GMM_VARS)
+	meanDict = {}
+	covDict = {}
+	pTransitionsDict = {}
+	pStatesDict = {}
+	for activity in activities:
+		stateIndices = stateIndicesDict[activity]
+		pTransitions = getTransitionProbs(stateIndices, SLF_PROB, NXT_PROB)
+		pStates = getStateProbs(stateIndices)
+		meanList = [means[i] for i in stateIndices]
+		covList = [covs[i] for i in stateIndices]
+		meanDict[activity] = meanList
+		covDict[activity] = covList
+		pTransitionsDict[activity] = pTransitions
+		pStatesDict[activity] = pStates
+	scoreMat, accMat = test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDict)
+	print "scoreMat"
+	print scoreMat
+	print "accMat"
+	print accMat
+
+
+def q2():
+	activities, stateNamesDict, stateIndicesDict, grmList, tdList, gtList = load()
+
+	scoreMat = np.zeros((len(grmList), len(tdList), ITERATIONS), dtype = float)
+	accMat = np.zeros((len(grmList), len(tdList), ITERATIONS), dtype = float)
+
 	lgList = []
-	for activity, stateNames, stateIndices in zip(activities, stateNamesList, stateIndicesList):
+	for activity in activities:
+		stateNames = stateNamesDict[activity]
+		stateIndices = stateIndicesDict[activity]
 		lgList.append(LearnGaussians(activity, stateNames, stateIndices, SEQUENCE_LOC))
+	
 	for it in range(ITERATIONS):
-		activityDict_means = {}
-		activityDict_covs = {}
+		meanDict = {}
+		covDict = {}
+		pTransitionsDict = {}
+		pStatesDict = {}
 		for lg in lgList:
-			mus, sigmas = lg.run()
-			activityDict_means[activity] = mus
-			activityDict_covs[activity] = sigmas
+			mus, sigmas, pTransitions, pStates = lg.run()
+			meanDict[activity] = mus
+			covDict[activity] = sigmas
+			pTransitionsDict[activity] = pTransitions
+			pStatesDict[activity] = pStates
+		scr, acc = test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDict)
+		scoreMat[:,:,it] = scr
+		accMat[:,:,it] = acc
+
+	# for it in range(ITERATIONS):
+	# 	mostLikelyGrammars = np.argmax(scoreMat[:,:,it], axis = 0)
+	# 	print "for iteration %d, the most likely grammars are: " % (it)
+	# 	print "vid1 : %d" % (mostLikelyGrammars[0])	
+	# 	print "vid2 : %d" % (mostLikelyGrammars[1])	
+	# 	print "vid3 : %d" % (mostLikelyGrammars[2])	
+
+	print "scoreMat"
+	print scoreMat
+	print "accMat"
+	print accMat
+
 	
 
 
 if __name__ == '__main__':
-	main()
+	q1()
+	# q2()
