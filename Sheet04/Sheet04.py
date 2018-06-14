@@ -14,22 +14,22 @@ SLF_PROB = 0.9
 NXT_PROB = 0.1
 
 
-HMM_DEF_DICT = "/home/arc/VA_Assignments/Sheet04/exc1/hmm_definition.dict"
-HMM_DEF_VECT = "/home/arc/VA_Assignments/Sheet04/exc1/hmm_definition.vector"
-HMM_ST_DEF_VECT = "/home/arc/VA_Assignments/Sheet04/exc1/hmm_state_definition.vector"
+HMM_DEF_DICT = "./exc1/hmm_definition.dict"
+HMM_DEF_VECT = "./exc1/hmm_definition.vector"
+HMM_ST_DEF_VECT = "./exc1/hmm_state_definition.vector"
 ST_INIT_SUFFIX = "initStates.npy"
-SEQUENCE_LOC = "/home/arc/VA_Assignments/Sheet04/exc2/train_samples/"
-GRAMMAR_LOC_1 = "/home/arc/VA_Assignments/Sheet04/exc1/test1.grammar"
-GRAMMAR_LOC_2 = "/home/arc/VA_Assignments/Sheet04/exc1/test2.grammar"
-GRAMMAR_LOC_3 = "/home/arc/VA_Assignments/Sheet04/exc1/test3.grammar"
-TEST_DATA_1 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_cereals.npy"
-TEST_DATA_2 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_coffee.npy"
-TEST_DATA_3 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_milk.npy"
-GT_1 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_cereals.gt"
-GT_2 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_coffee.gt"
-GT_3 = "/home/arc/VA_Assignments/Sheet04/exc1/P03_cam01_P03_milk.gt"
-GMM_MEANS = "/home/arc/VA_Assignments/Sheet04/exc1/GMM_mean.matrix"
-GMM_VARS = "/home/arc/VA_Assignments/Sheet04/exc1/GMM_var.matrix"
+SEQUENCE_LOC = "./exc2/train_samples/"
+GRAMMAR_LOC_1 = "./exc1/test1.grammar"
+GRAMMAR_LOC_2 = "./exc1/test2.grammar"
+GRAMMAR_LOC_3 = "./exc1/test3.grammar"
+TEST_DATA_1 = "./exc1/P03_cam01_P03_cereals.npy"
+TEST_DATA_2 = "./exc1/P03_cam01_P03_coffee.npy"
+TEST_DATA_3 = "./exc1/P03_cam01_P03_milk.npy"
+GT_1 = "./exc1/P03_cam01_P03_cereals.gt"
+GT_2 = "./exc1/P03_cam01_P03_coffee.gt"
+GT_3 = "./exc1/P03_cam01_P03_milk.gt"
+GMM_MEANS = "./exc1/GMM_mean.matrix"
+GMM_VARS = "./exc1/GMM_var.matrix"
 
 
 
@@ -47,11 +47,11 @@ def fixZeros(arr):
 	"""
 	A fix to prevent division by zero.
 	"""
-	inf = float("inf")
+	# inf = float("inf")
 	arr = arr.copy()
 	arr[arr == 0.0] = 1.0
-	arr[arr == inf] = 1.0
-	arr[arr == -inf] = 1.0
+	# arr[arr == inf] = 1.0
+	# arr[arr == -inf] = 1.0
 	return arr
 
 def sumNormalize(arr):
@@ -300,7 +300,6 @@ class BaumWelch(object):
 		self.stateCount = len(pStates)
 		self.obsCount = observations.shape[0] # T
 		self.dim = observations.shape[1]
-		# self.run()
 
 
 	def run(self):
@@ -325,16 +324,6 @@ class BaumWelch(object):
 			alpha_t = sumNormalize(self.pEmissions[:,t+1].reshape(self.stateCount, 1) * np.sum(c1, axis = 0).reshape(self.stateCount, 1))
 			c2 = beta_t * self.pEmissions[:,t+1].reshape(self.stateCount, 1)
 			beta_t = sumNormalize(np.sum(self.pTransitions * c2.T, axis = 1)).reshape(self.stateCount, 1)
-			# for i in range(self.stateCount):
-			# 	sumAlpha = 0
-			# 	sumBeta = 0
-			# 	for j in range(self.stateCount):
-			# 		sumAlpha += alpha_t[j] * self.pTransitions[j,i]
-			# 		sumBeta += beta_t[j] * self.pTransitions[i,j] * self.pEmissions[j,(self.obsCount - 1 - t)]
-			# 	alpha_t[i] = self.pEmissions[i, t+1] * sumAlpha
-			# 	beta_t[i] = sumBeta
-			# alpha_t = sumNormalize(alpha_t)
-			# beta_t = sumNormalize(beta_t)
 			self.alpha.append(alpha_t)
 			self.beta.appendleft(beta_t)
 		return
@@ -356,15 +345,10 @@ class BaumWelch(object):
 			if t == self.obsCount-1:
 				continue # eta only has T-1 elements 
 			beta_t = fixZeros(self.beta[t])
-			# eta_t = np.zeros((self.stateCount, self.stateCount), dtype = float)
-			# split up the product into components
 			c1 = gamma_t / beta_t
 			c2 = self.pEmissions[:,t+1].reshape(self.stateCount, 1) * self.beta[t+1].reshape(self.stateCount, 1)
 			c3 = self.pTransitions * c2.T
 			eta_t = c1 * c3
-			# for i in range(self.stateCount):
-			# 	for j in range(self.stateCount):
-			# 		eta_t[i,j] = gamma_t[i] * self.pTransitions[i,j] * self.pEmissions[j, t+1] * self.beta[t+1][j] / beta_t[i]
 			self.eta.append(eta_t)
 		return
 
@@ -526,7 +510,6 @@ class LearnGaussians(object):
 		pTransitions = self.__updateTransitionProbs__()
 		self.__updateObservationProbs__(mus, sigmas)
 		pStates = self.__updateStateProbabilities__()
-		self.__runBaumWelch__()
 		return mus, sigmas, pTransitions, pStates
 
 
@@ -669,6 +652,7 @@ def q1():
 def q2():
 	activities, stateNamesDict, stateIndicesDict, grmList, tdList, gtList = load()
 
+	# Create a learner list
 	lgList = []
 	for activity in activities:
 		stateNames = stateNamesDict[activity]
@@ -696,5 +680,5 @@ def q2():
 
 
 if __name__ == '__main__':
-	q1() # solution to question 1
-	# q2() # solution to question 2
+	# q1() # solution to question 1
+	q2() # solution to question 2
