@@ -160,7 +160,7 @@ def compare(stateSeq, gtLoc):
 	correct = 0
 	with open(gtLoc, "r") as gtFile:
 		for idx in range(len(stateSeq)):
-			actual = gtFile.readline()
+			actual = gtFile.readline().strip()
 			decoded = stateSeq[idx]
 			if decoded.startswith(actual):
 				correct += 1
@@ -291,10 +291,10 @@ class BaumWelch(object):
 		self.stateCount = len(pStates)
 		self.obsCount = observations.shape[0] # T
 		self.dim = observations.shape[1]
-		self.reset()
+		# self.run()
 
 
-	def reset(self):
+	def run(self):
 		# initialize forward and backward passes
 		self.alpha = deque()
 		self.beta = deque()
@@ -311,16 +311,21 @@ class BaumWelch(object):
 		self.alpha.append(alpha_t)
 		self.beta.append(beta_t)
 		for t in range(self.obsCount - 1):
-			for i in range(self.stateCount):
-				sumAlpha = 0
-				sumBeta = 0
-				for j in range(self.stateCount):
-					sumAlpha += alpha_t[j] * self.pTransitions[j,i]
-					sumBeta += beta_t[j] * self.pTransitions[i,j] * self.pEmissions[j,(self.obsCount - 1 - t)]
-				alpha_t[i] = self.pEmissions[i, t+1] * sumAlpha
-				beta_t[i] = sumBeta
-			alpha_t = sumNormalize(alpha_t)
-			beta_t = sumNormalize(beta_t)
+			# perform calculations in components
+			c1 = alpha_t * self.pTransitions
+			alpha_t = sumNormalize(self.pEmissions[:,t+1].reshape(self.stateCount, 1) * np.sum(c1, axis = 0).reshape(self.stateCount, 1))
+			c2 = beta_t * self.pEmissions[:,t+1].reshape(self.stateCount, 1)
+			beta_t = sumNormalize(np.sum(self.pTransitions * c2.T, axis = 1)).reshape(self.stateCount, 1)
+			# for i in range(self.stateCount):
+			# 	sumAlpha = 0
+			# 	sumBeta = 0
+			# 	for j in range(self.stateCount):
+			# 		sumAlpha += alpha_t[j] * self.pTransitions[j,i]
+			# 		sumBeta += beta_t[j] * self.pTransitions[i,j] * self.pEmissions[j,(self.obsCount - 1 - t)]
+			# 	alpha_t[i] = self.pEmissions[i, t+1] * sumAlpha
+			# 	beta_t[i] = sumBeta
+			# alpha_t = sumNormalize(alpha_t)
+			# beta_t = sumNormalize(beta_t)
 			self.alpha.append(alpha_t)
 			self.beta.appendleft(beta_t)
 		return
@@ -337,15 +342,20 @@ class BaumWelch(object):
 			divisor = np.sum(self.alpha[t] * self.beta[t], axis = 0)[0] # single element array
 			if abs(divisor) < EPSILON:
 				divisor = 1.0
-			for i in range(self.stateCount):
-				gamma_t[i] = (self.alpha[t][i] * self.beta[t][i]) / divisor
+			gamma_t = (self.alpha[t] * self.beta[t]) / divisor
 			self.gamma.append(gamma_t)
-		for t in range(self.obsCount - 1):
+			if t == self.obsCount-1:
+				continue # eta only has T-1 elements 
 			beta_t = fixZeros(self.beta[t])
-			eta_t = np.zeros((self.stateCount, self.stateCount), dtype = float)
-			for i in range(self.stateCount):
-				for j in range(self.stateCount):
-					eta_t[i,j] = self.gamma[t][i] * self.pTransitions[i,j] * self.pEmissions[j, t+1] * self.beta[t+1][j] / beta_t[i]
+			# eta_t = np.zeros((self.stateCount, self.stateCount), dtype = float)
+			# split up the product into components
+			c1 = gamma_t / beta_t
+			c2 = self.pEmissions[:,t+1].reshape(self.stateCount, 1) * self.beta[t+1].reshape(self.stateCount, 1)
+			c3 = self.pTransitions * c2.T
+			eta_t = c1 * c3
+			# for i in range(self.stateCount):
+			# 	for j in range(self.stateCount):
+			# 		eta_t[i,j] = gamma_t[i] * self.pTransitions[i,j] * self.pEmissions[j, t+1] * self.beta[t+1][j] / beta_t[i]
 			self.eta.append(eta_t)
 		return
 
@@ -482,7 +492,7 @@ class LearnGaussians(object):
 		"""
 		Update the initial state distributions.
 		"""
-		pStates = np.zeros((len(self.stateCount), 1), dtype = float)
+		pStates = np.zeros((self.stateCount, 1), dtype = float)
 		for nSeq in range(len(self.seqFeatures)):
 			gamma, _ = self.bwList[nSeq].getTemporaries()
 			pStates += gamma[0]
@@ -493,12 +503,12 @@ class LearnGaussians(object):
 		return pStates
 
 
-	def __resetBaumWelch__(self):
+	def __runBaumWelch__(self):
 		"""
-		Reset Baum-Welch for next iteration
+		run Baum-Welch for next iteration
 		"""
 		for bw in self.bwList:
-			bw.reset()
+			bw.run()
 		return
 
 
@@ -506,12 +516,13 @@ class LearnGaussians(object):
 		"""
 		Execute the iterative HMM parameter learning procedure.
 		"""
+		self.__runBaumWelch__()
 		mus = self.__mu__()
 		sigmas = self.__sigma__(mus)
 		pTransitions = self.__updateTransitionProbs__()
 		self.__updateObservationProbs__(mus, sigmas)
 		pStates = self.__updateStateProbabilities__()
-		self.__resetBaumWelch__()
+		self.__runBaumWelch__()
 		return mus, sigmas, pTransitions, pStates
 
 
@@ -541,14 +552,15 @@ def viterbi(pStates, pTransitions, pEmissions):
 	for t in range(1, obsCount):
 		for i in range(stateCount):
 			emsn = pEmissions[i,t] # log likelihoods
-			probs = T1[:,t-1] + np.ma.log(pTransitions[:,i]).filled(0) + emsn
+			probs = T1[:,t-1] + np.ma.log(pTransitions[:,i]).filled(-float('inf')) + emsn
 			T1[i,t] = np.max(probs)
 			T2[i,t] = np.argmax(probs)
 
-	z = deque()
-	z.append(np.argmax(T1[:,obsCount-1]))
-	for t in range(2, obsCount-1, -1):
-		z.appendleft(T2[z[t],t])
+	z = np.full((obsCount), fill_value = -1, dtype = int)
+	z[0] = 0
+	z[-1] = np.argmax(T1[:,obsCount-1])
+	for t in range(obsCount-1, 1, -1):
+		z[t-1] = T2[z[t],t]
 	return z
 
 
@@ -557,30 +569,42 @@ def viterbi(pStates, pTransitions, pEmissions):
 
 
 def load():
-	activities = getActivities(HMM_DEF_DICT)
-	stateNamesDict, stateIndicesDict = getActivityStates(activities)
+	"""
+	Loads all activities and their corresponding states, the grammars, testa data and the groud truths.
+	"""
+	activities = getActivities(HMM_DEF_DICT) # load activities
+	stateNamesDict, stateIndicesDict = getActivityStates(activities) # load named activity states
+	
+	# load grammars
 	grm1 = GrammarContext(GRAMMAR_LOC_1, activities, stateIndicesDict, stateNamesDict) 
 	grm2 = GrammarContext(GRAMMAR_LOC_2, activities, stateIndicesDict, stateNamesDict) 
 	grm3 = GrammarContext(GRAMMAR_LOC_3, activities, stateIndicesDict, stateNamesDict)
 	grmList = [grm1, grm2, grm3]
 
+	# load test data
 	td1 = np.load(TEST_DATA_1).T
 	td2 = np.load(TEST_DATA_2).T
 	td3 = np.load(TEST_DATA_3).T
 	tdList = [td1, td2, td3]
 
+	# load ground truths
 	gtList = [GT_1, GT_2, GT_3]
 
 	return activities, stateNamesDict, stateIndicesDict, grmList, tdList, gtList
 
 
 def test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDict):
+	"""
+	Perform inference for all grammars and all test data.
+	Return the scores and accuracies per grammar per test data, in a grid.
+	"""
 	scoreMat = np.zeros((len(grmList), len(tdList)), dtype = float)
 	accMat = np.zeros((len(grmList), len(tdList)), dtype = float)
 	for i in range(len(grmList)):
 		pTransitions = grmList[i].getTransitionProbs(pTransitionsDict)
 		pStates = grmList[i].getStateProbs(pStatesDict)
 		for j in range(len(tdList)):
+			print "Testing for grammar %d, video %d..." % (i, j)
 			pEmissions = grmList[i].getEmissionProbs(tdList[j], meanDict, covDict)
 			stateIndexSeq = viterbi(pStates, pTransitions, pEmissions)
 			stateNameSeq = grmList[i].decodeStateSeq(stateIndexSeq)
@@ -591,14 +615,37 @@ def test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDi
 	return scoreMat, accMat
 
 
+def results(scoreMat, accMat, grmList, tdList):
+	"""
+	Display results of the experiment.
+	"""
+	print "SCORE MATRIX (grammar X video)"
+	print scoreMat
+	print "ACCURACY (MoF) MATRIX (grammar X video)"
+	print accMat
+	mostLikelyGrammars = np.argmax(scoreMat, axis = 0)
+	print "The most likely grammars are: "
+	print "For vid1 grammar: %d" % (mostLikelyGrammars[0])	
+	print "For vid2 grammar: %d" % (mostLikelyGrammars[1])	
+	print "For vid3 grammar: %d" % (mostLikelyGrammars[2])	
+
+
 def q1():
+	"""
+	Solution to question 1.
+	"""
+	# load all data
 	activities, stateNamesDict, stateIndicesDict, grmList, tdList, gtList = load()
+	
+	# load the GMM parameters
 	means = np.loadtxt(GMM_MEANS)
 	covs = np.loadtxt(GMM_VARS)
 	meanDict = {}
 	covDict = {}
 	pTransitionsDict = {}
 	pStatesDict = {}
+
+	# construct data structures per activity
 	for activity in activities:
 		stateIndices = stateIndicesDict[activity]
 		pTransitions = getTransitionProbs(stateIndices, SLF_PROB, NXT_PROB)
@@ -609,18 +656,14 @@ def q1():
 		covDict[activity] = covList
 		pTransitionsDict[activity] = pTransitions
 		pStatesDict[activity] = pStates
+	
+	# perform test with the given data and grammars
 	scoreMat, accMat = test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDict)
-	print "scoreMat"
-	print scoreMat
-	print "accMat"
-	print accMat
+	results(scoreMat, accMat, grmList, tdList)
 
 
 def q2():
 	activities, stateNamesDict, stateIndicesDict, grmList, tdList, gtList = load()
-
-	scoreMat = np.zeros((len(grmList), len(tdList), ITERATIONS), dtype = float)
-	accMat = np.zeros((len(grmList), len(tdList), ITERATIONS), dtype = float)
 
 	lgList = []
 	for activity in activities:
@@ -629,35 +672,25 @@ def q2():
 		lgList.append(LearnGaussians(activity, stateNames, stateIndices, SEQUENCE_LOC))
 	
 	for it in range(ITERATIONS):
+		print "Iteration: %d" % (it)
 		meanDict = {}
 		covDict = {}
 		pTransitionsDict = {}
 		pStatesDict = {}
+		print "Training..."
 		for lg in lgList:
 			mus, sigmas, pTransitions, pStates = lg.run()
 			meanDict[activity] = mus
 			covDict[activity] = sigmas
 			pTransitionsDict[activity] = pTransitions
 			pStatesDict[activity] = pStates
-		scr, acc = test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDict)
-		scoreMat[:,:,it] = scr
-		accMat[:,:,it] = acc
-
-	# for it in range(ITERATIONS):
-	# 	mostLikelyGrammars = np.argmax(scoreMat[:,:,it], axis = 0)
-	# 	print "for iteration %d, the most likely grammars are: " % (it)
-	# 	print "vid1 : %d" % (mostLikelyGrammars[0])	
-	# 	print "vid2 : %d" % (mostLikelyGrammars[1])	
-	# 	print "vid3 : %d" % (mostLikelyGrammars[2])	
-
-	print "scoreMat"
-	print scoreMat
-	print "accMat"
-	print accMat
-
+		scoreMat, accMat = test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDict)
+		print "Testing..."
+		results(scoreMat, accMat, grmList, tdList)
+	return
 	
 
 
 if __name__ == '__main__':
-	q1()
-	# q2()
+	# q1()
+	q2()
