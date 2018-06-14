@@ -5,6 +5,7 @@ import re
 import scipy.stats as stats
 from collections import deque
 import sys
+import warnings
 
 GMM_DIM = 64
 EPSILON = 0.000001
@@ -46,8 +47,11 @@ def fixZeros(arr):
 	"""
 	A fix to prevent division by zero.
 	"""
+	inf = float("inf")
 	arr = arr.copy()
 	arr[arr == 0.0] = 1.0
+	arr[arr == inf] = 1.0
+	arr[arr == -inf] = 1.0
 	return arr
 
 def sumNormalize(arr):
@@ -59,13 +63,18 @@ def sumNormalize(arr):
 		s = 1.0
 	return arr / s
 
-def normalizePerRow(arr2d, checkZeros = True):
+def normalizePerRow(arr2d):
 	"""
 	Ensures that each row sums to 1.0.
 	"""
 	rowSums = arr2d.sum(axis=1)
-	if checkZeros:
-		rowSums = fixZeros(rowSums) # prevent division by zero
+	rowSums = fixZeros(rowSums) # prevent division by zero
+	# with warnings.catch_warnings():
+	# 	warnings.filterwarnings('error')
+	# 	try:
+	# 		normalized = arr2d / rowSums[:, np.newaxis]
+	# 	except Warning as e:
+	# 		print rowSums
 	normalized = arr2d / rowSums[:, np.newaxis]
 	return normalized
 
@@ -410,20 +419,17 @@ class LearnGaussians(object):
 		"""
 		Get the list of means of all Gaussians.
 		"""
-		mus = []
-		for i in range(self.stateCount):
-			mu = np.zeros(self.dim, dtype = float)
-			sumGamma = 0
-			for nSeq in range(len(self.seqFeatures)):
-				observations = self.sequences[nSeq] # a sequence of T observations
-				gamma, _ = self.bwList[nSeq].getTemporaries()
-				for t in range(len(gamma)):
-					observation_t = observations[t].reshape(self.dim)
-					mu += gamma[t][i] * observation_t
-					sumGamma += gamma[t][i]
-			sumGamma = 1.0 if abs(sumGamma) < EPSILON else sumGamma
-			mu = mu / sumGamma
-			mus.append(mu)
+		mus = np.zeros((self.stateCount, self.dim), dtype = float)
+		sumGamma = np.zeros((self.stateCount, 1), dtype = float)
+		for nSeq in range(len(self.seqFeatures)):
+			observations = self.sequences[nSeq] # a sequence of T observations
+			gamma, _ = self.bwList[nSeq].getTemporaries()
+			for t in range(len(gamma)):
+				observation_t = observations[t].reshape(self.dim)
+				mus += gamma[t] * observation_t
+				sumGamma += gamma[t]
+		sumGamma = fixZeros(sumGamma)
+		mus = mus / sumGamma
 		return mus
 
 
@@ -431,21 +437,18 @@ class LearnGaussians(object):
 		"""
 		Get the list standard deviation of the gaussians.
 		"""
-		sigmas = []
-		for i in range(self.stateCount):
-			sigma = np.zeros((self.dim, self.dim), dtype = float)
-			sumGamma = 0
-			for nSeq in range(len(self.seqFeatures)):
-				observations = self.sequences[nSeq] # a sequence of T observations
-				gamma, _ = self.bwList[nSeq].getTemporaries()
-				for t in range(len(gamma)):
-					observation_t = observations[t].reshape(self.dim)
-					diff = (observation_t - mus[i]).reshape(self.dim, 1)
-					sigma += gamma[t][i] * diff * diff.T
-					sumGamma += gamma[t][i]
-			sumGamma = 1.0 if abs(sumGamma) < EPSILON else sumGamma
-			sigma = sigma / sumGamma
-			sigmas.append(sigma)
+		sigmas = np.zeros((self.stateCount, self.dim), dtype = float)
+		sumGamma = np.zeros((self.stateCount, 1), dtype = float)
+		for nSeq in range(len(self.seqFeatures)):
+			observations = self.sequences[nSeq] # a sequence of T observations
+			gamma, _ = self.bwList[nSeq].getTemporaries()
+			for t in range(len(gamma)):
+				observation_t = observations[t].reshape(1, self.dim)
+				diff = (observation_t - mus).reshape(mus.shape)
+				sigmas += gamma[t] * np.square(diff) # assuma diagonal covariance
+				sumGamma += gamma[t]
+		sumGamma = fixZeros(sumGamma)
+		sigmas = sigmas / sumGamma
 		return sigmas
 
 
@@ -454,15 +457,13 @@ class LearnGaussians(object):
 		Update the transition probabilities for the baum-welch algorithm.
 		"""
 		pTransitions = np.zeros((self.stateCount, self.stateCount), dtype = float)
-		for i in range(self.stateCount):
-			sumGamma = 0
-			for j in range(self.stateCount):
-				for nSeq in range(len(self.seqFeatures)):
-					gamma, eta = self.bwList[nSeq].getTemporaries()
-					for t in range(len(eta)):
-						pTransitions[i,j] += eta[t][i,j]
-						sumGamma += gamma[t][i]
-		pTransitions = normalizePerRow(pTransitions, checkZeros = False)
+		sumGamma = np.zeros((self.stateCount, 1), dtype = float)
+		for nSeq in range(len(self.seqFeatures)):
+			gamma, eta = self.bwList[nSeq].getTemporaries()
+			for t in range(len(eta)):
+				pTransitions += eta[t]
+				sumGamma += gamma[t]
+		pTransitions = normalizePerRow(pTransitions)
 		for bw in self.bwList:
 			bw.pTransitions = pTransitions
 		return pTransitions
@@ -478,12 +479,15 @@ class LearnGaussians(object):
 			for j in range(self.stateCount):
 				mu = mus[j]
 				sigma = sigmas[j]
-				singular = False
-				if abs(np.linalg.det(sigma)) == 0:
-					pEmissions[j, :] = np.zeros((len(observations)), dtype = float) # singular sigma
-				else:
+				try:
 					pEmissions[j, :] = stats.multivariate_normal.pdf(observations, mean = mu, cov = sigma)
-			pEmissions = normalizePerRow(pEmissions, checkZeros = False)
+				except Exception as e:
+					print "mu"
+					print mu
+					print "sigma"
+					print sigma
+					raise e
+			pEmissions = normalizePerRow(pEmissions)
 			self.bwList[nSeq].pEmissions = pEmissions
 		return
 
@@ -680,10 +684,10 @@ def q2():
 		print "Training..."
 		for lg in lgList:
 			mus, sigmas, pTransitions, pStates = lg.run()
-			meanDict[activity] = mus
-			covDict[activity] = sigmas
-			pTransitionsDict[activity] = pTransitions
-			pStatesDict[activity] = pStates
+			meanDict[lg.activity] = mus
+			covDict[lg.activity] = sigmas
+			pTransitionsDict[lg.activity] = pTransitions
+			pStatesDict[lg.activity] = pStates
 		scoreMat, accMat = test(grmList, tdList, gtList, pTransitionsDict, pStatesDict, meanDict, covDict)
 		print "Testing..."
 		results(scoreMat, accMat, grmList, tdList)
@@ -692,5 +696,5 @@ def q2():
 
 
 if __name__ == '__main__':
-	# q1()
-	q2()
+	q1() # solution to question 1
+	# q2() # solution to question 2
