@@ -1,6 +1,9 @@
 Submission by:
 Arindam Roychoudhury.
 
+An implementation of : 
+H. Wang: Dense trajectories and motion boundary descriptors for action recognition, 2013
+
 
 Calculating trajectory descriptors for 65 training videos and 28 test videos takes around 2-2.5 hrs to complete with an average of 1-2 minutes per video. All trajectory descriptors are saved to disk. 
 
